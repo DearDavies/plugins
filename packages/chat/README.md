@@ -2,7 +2,7 @@
 
 A chat page in [magpie](https://usemagpie.ai)'s window. Talk to magpie's own models with your MCP servers, instructions and skills, with images and LaTeX, without starting an agent.
 
-Made by **Magic_zero** ([Magiczerowxy](https://github.com/Magiczerowxy)), from [Magiczerowxy/magpie-chat](https://github.com/Magiczerowxy/magpie-chat) (0.1.18). This package is that code, with the changes listed under [Changes from the original](#changes-from-the-original).
+Made by **Magic_zero** ([Magiczerowxy](https://github.com/Magiczerowxy)), from [Magiczerowxy/magpie-chat](https://github.com/Magiczerowxy/magpie-chat) (0.1.21). This package is that code, with the changes listed under [Changes from the original](#changes-from-the-original).
 
 ![Chat inside magpie's window](https://raw.githubusercontent.com/Magiczerowxy/magpie-chat/main/screenshots/23-math-and-layout.png)
 
@@ -21,9 +21,11 @@ It then has a tab, **Chat** (对话, 對話, チャット), under Plugins in the
 - **magpie's models.** The list comes from the gateway's `/v1/models`. Models with reasoning levels get an effort picker.
 - **magpie's library.** Tick instructions and skills from `~/.config/magpie/library/` (folded into the system prompt), and MCP servers from `library.json` (their tools run as real `tool_calls`, at most 8 rounds, Streamable HTTP and stdio).
 - **Images and files.** Pick, drop or paste them. Images go to the model as `image_url`.
-- **Streaming.** Reasoning unfolds while it arrives, then collapses.
+- **Streaming.** Reasoning unfolds while it arrives, then collapses. While the answer streams, the page follows it down unless you scroll up yourself; scroll back to the bottom and it resumes.
+- **Model status.** Every reply ends with a line saying what the model is doing: `Magpie正在觅食ing… · 2s` with a running timer while it generates, green `Magpie找到了食物！ · 2s` when done, red `Magpie没有找到食物` on failure. The elapsed time is kept with the conversation.
 - **Math.** `$…$`, `$$…$$`, `\(…\)` and `\[…\]` render with a bundled KaTeX 0.16.11. No CDN.
-- **Conversations kept**, pinned or deleted, under `~/.config/magpie/magpie-chat/`.
+- **Conversations kept**, pinned, renamed or deleted, under `~/.config/magpie/magpie-chat/`. Clicking "+" starts a draft row in the sidebar; it becomes a real conversation as soon as you send, and disappears if you switch away without writing anything. The pencil button on each row renames it inline.
+- **Layout.** Conversation width and composer width are adjustable in the sidebar; a **Sync** switch keeps the two equal — move either one and the other follows.
 - **Looks like magpie.** Colors and fonts come from the window's theme.
 
 It registers no provider, asks for no sign-in and stores no credentials of its own. Every request goes out through magpie's gateway, so usage, routing and failover are the same as an agent's.

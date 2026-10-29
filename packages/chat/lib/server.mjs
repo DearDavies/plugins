@@ -81,6 +81,7 @@ const DEFAULTS = {
   rightWidth: 0,    // 设置栏宽度（0 = 用默认值）
   convWidth: 72,    // 会话内容列宽度（%），100 = 铺满
   composerWidth: 70, // 输入框宽度（%）
+  syncWidth: false, // 布局里的"同步调整"：打开后两个宽度始终一致
 };
 
 function cleanSettings(raw) {
@@ -101,7 +102,8 @@ function cleanSettings(raw) {
     leftWidth: Number.isFinite(Number(s.leftWidth)) ? Math.max(0, Math.min(420, Number(s.leftWidth))) : 0,
     rightWidth: Number.isFinite(Number(s.rightWidth)) ? Math.max(0, Math.min(560, Number(s.rightWidth))) : 0,
     convWidth: Number.isFinite(Number(s.convWidth)) ? Math.max(0, Math.min(100, Number(s.convWidth))) : 72,
-    composerWidth: Number.isFinite(Number(s.composerWidth)) ? Math.max(40, Math.min(100, Number(s.composerWidth))) : 70,
+    composerWidth: Number.isFinite(Number(s.composerWidth)) ? Math.max(35, Math.min(100, Number(s.composerWidth))) : 70,
+    syncWidth: s.syncWidth === true,
   };
 }
 
@@ -232,7 +234,7 @@ function corsHeaders(req) {
   return {
     "access-control-allow-origin": allow,
     "access-control-allow-headers": "content-type, " + TOKEN_HEADER,
-    "access-control-allow-methods": "GET,POST,DELETE,OPTIONS",
+    "access-control-allow-methods": "GET,POST,PATCH,DELETE,OPTIONS",
     vary: "Origin",
   };
 }
@@ -534,8 +536,12 @@ async function runChat({ res, body, settings, store }, controllers) {
   }
 }
 
-export async function startServer({ configDir: dir, options = {} } = {}) {
-  const store = createStore(dir || configDir());
+export async function startServer({ configDir: dirArg, options = {} } = {}) {
+  // 调用方常传 configDir: ""；libraryView(dir = configDir()) 的默认值只在参数是
+  // undefined 时生效，空字符串会让 join("", "library") 变成相对路径，指令 / 技能 /
+  // MCP 全读不到。这里统一兜成真实目录。
+  const dir = dirArg || configDir();
+  const store = createStore(dir);
   const controllers = new Map();
   // 0 也是合法的（让系统挑一个空闲端口，测试用）
   const want = options.port ?? process.env.MAGPIE_CHAT_PORT;
@@ -691,6 +697,19 @@ export async function startServer({ configDir: dir, options = {} } = {}) {
         if (conv && req.method === "DELETE") {
           await store.removeConversation(conv[1]);
           return send(res, 200, { ok: true });
+        }
+        // 只改标题：/api/conversations 的 POST 是整份覆盖（messages 也会被清空），
+        // 所以重命名单独走 PATCH。
+        if (conv && req.method === "PATCH") {
+          const body = await readBody(req);
+          const c = await store.getConversation(conv[1]);
+          if (!c) return send(res, 404, { error: "没有这个对话" });
+          const title = String(body.title || "").trim().replace(/\s+/g, " ").slice(0, 90);
+          if (!title) return send(res, 400, { error: "标题不能为空" });
+          c.title = title;
+          c.updated = Date.now();
+          await writeFile(store.convPath(conv[1]), JSON.stringify(c));
+          return send(res, 200, { id: c.id, title: c.title, updated: c.updated });
         }
         if (path === "/api/chat" && req.method === "POST") {
           const body = await readBody(req);
