@@ -93,6 +93,9 @@ API (`@ai-sdk/openai`), signed as the CLI signs them:
   (`500000` for `@500k`). The plain id sends no such header and stays on
   the default window.
 - `x-grok-conv-id`: the request's `prompt_cache_key`.
+- `x-grok-doom-loop-check: 1024` and `x-grok-exact-repetition-check: 64`
+  on a Responses request, as Grok Build sends them: the proxy then stops a
+  reply that repeats itself after ~1K tokens instead of letting it run on.
 
 The backend turns away some of what a request may carry, so the plugin
 leaves these out:

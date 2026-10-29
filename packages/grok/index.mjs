@@ -19,6 +19,7 @@ const BASE = "https://cli-chat-proxy.grok.com/v1"
 const CLIENT_VERSION = "1.0.41"
 const CPA_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
 const CPA_SCOPE = `https://auth.x.ai::${CPA_CLIENT_ID}`
+const LOOP_CHECKS = [["x-grok-doom-loop-check", "1024"], ["x-grok-exact-repetition-check", "64"]]
 const REFRESH_MARGIN = 5 * 60 * 1000 // a token this close to its end is renewed before a request
 const LEAD_MS = REFRESH_MARGIN // and this close, magpie renews it ahead of time (auth.refresh)
 const LINK_WAIT = 30 * 1000
@@ -987,6 +988,15 @@ export const GrokAuthPlugin = async ({ client, magpie }) => {
             }
             if (asked.window) headers.set("x-grok-context-window", String(asked.window))
             if (typeof parsed.prompt_cache_key === "string" && parsed.prompt_cache_key) headers.set("x-grok-conv-id", parsed.prompt_cache_key)
+            // Grok Build asks the proxy to watch every Responses stream for a
+            // model stuck repeating itself: without these the proxy cuts a
+            // loop only after ~4K tokens, and a looser one (a fence or a line
+            // over and over) runs to max_output_tokens (yetone/magpie#3594).
+            // The values are Grok Build 1.0.67's (doom_loop_recovery's
+            // max_threshold is the 64).
+            if (new URL(req.url).pathname.endsWith("/responses")) {
+              for (const [k, v] of LOOP_CHECKS) if (!headers.has(k)) headers.set(k, v)
+            }
             headers.delete("content-length")
             const send = async (key) => {
               await sign(headers, key)
