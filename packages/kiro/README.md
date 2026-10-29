@@ -105,6 +105,12 @@ request:
     that can't be read or brought under is replaced by a short note, so the
     conversation goes on (#428). Smaller images are sent as they are.
   - Tools the history used but the request doesn't offer are declared.
+  - A tool's input schema says `type: "object"` at its root, as Kiro
+    wants: one that says no type (or object-or-null) is sent saying so, and
+    an empty one as an object with no properties. Kiro answers 400
+    `REQUEST_BODY_INVALID` to either. Everything under the root (a union
+    there, properties, `$ref`s, `nullable`) is sent as given, and a root
+    that names another type is left alone.
 - It turns the AWS event stream Kiro answers with back into Messages'
   events (streamed) or one message. The reply includes text, thinking,
   tool calls and usage. When Kiro reports only how full the context is,
@@ -113,11 +119,85 @@ request:
   the prompt, with a budget: low 10k, medium 20k, high 30k, xhigh and max
   50k (as magpie's built-in Kiro: #120). The
   `<thinking>` block of the reply comes back as thinking.
+- Anthropic's hosted web search is answered with Kiro's own web search
+  (see [Web search](#web-search)).
 - Kiro's failures keep their meaning:
   - input too long → 400
   - no capacity → 503
   - usage limit → 429
   - throttling → "rate limited"
+
+## Web search
+
+A request offering Anthropic's hosted web search,
+`{"type": "web_search_20250305", "name": "web_search", "max_uses": n}`, is
+searched with Kiro's own web search, sent as kiro-cli (2.35) sends it:
+
+- The model is offered kiro-cli's `web_search` tool as kiro-cli's agent
+  offers it: its description, a `query` (200 characters at most) and the
+  `__tool_use_purpose` kiro-cli adds to each tool. A call the model makes to
+  it is searched here, never passed to the caller as a `tool_use`. Its
+  `__tool_use_purpose` is kiro-cli's alone: it isn't searched for, and the
+  caller's `server_tool_use` has the `query` only.
+- The search is Kiro's runtime's `InvokeMCP` operation:
+  `POST runtime.<region>.kiro.dev/`, `Content-Type:
+  application/x-amz-json-1.0`, `x-amz-target:
+  AmazonCodeWhispererStreamingService.InvokeMCP`, in the account's region
+  with its token. Its body is a JSON-RPC `tools/call` of `web_search` with
+  `{query}` and nothing else, and the profile as `profileArn` beside it:
+  over AWS JSON 1.0 that member is sent in the body, and without it there
+  Kiro answers 400 `profileArn is required for this request`. It goes in
+  `x-amzn-kiro-profile-arn` too, as kiro-cli 2.35 sends it. An API key,
+  sent as `tokentype: API_KEY`, names no profile in either, as kiro-cli
+  names none for one. The answer is
+  `{jsonrpc, id, result, error}`, the result being the `tools/call`'s.
+- The pages found go back to the model as the call's result (title, URL,
+  date, snippet), and it is asked again. The caller is answered as
+  Anthropic answers: `server_tool_use` and `web_search_tool_result` blocks
+  (streamed or not), then the answer, and `usage.server_tool_use.web_search_requests`.
+- Each result has the page's `title`, `url` and `page_age`. `encrypted_content`
+  is `""`: Kiro has no sealed copy of the page, and none is made up (as
+  magpie's own search answers). The answer cites its pages by URL in its
+  text; it has no `citations`, which need Anthropic's encrypted index.
+- `max_uses` is kept, and no request searches more than 10 times. A search
+  past it is a `max_uses_exceeded` error; a model still searching after
+  `max_uses` + 2 turns is stopped with `pause_turn`. A `max_uses` that isn't
+  a whole number of at least 1 is a 400.
+- `allowed_domains` or `blocked_domains` filter the pages Kiro's search
+  returns; the search itself isn't told them, so fewer pages may come back.
+  A domain takes in its subdomains; with a path (`example.com/Docs`), only
+  pages under it, the host matched in any case and the path as written.
+  Both at once, or `user_location`, which Kiro's search has no place for,
+  is a 400.
+- A search that fails (Kiro unreachable, an error, an answer it can't
+  read, a query over 200 characters) is a `web_search_tool_result_error`,
+  and the model is told why. A token Kiro's search turns down (403) is
+  refreshed once, as a request's is. A cancelled request stops searching.
+- Kiro failing on a turn after a search is an error: streamed, an `error`
+  event after the blocks said; not streamed, the failure's status, not a
+  200 holding only the searches.
+- A turn that also calls the caller's own tools ends there (`tool_use`),
+  with its searches. The conversation sent back, with its
+  `server_tool_use` and `web_search_tool_result` blocks, gives the model
+  each search's call and result again. A tool of the caller's named
+  `web_search` (no hosted `type`) stays the caller's.
+- Other hosted tools are not sent, as before.
+
+### Supported scope
+
+Only `web_search_20250305` named `web_search` is searched (Claude Code sends
+it). Any other tool whose type begins `web_search` (a newer version such as
+`web_search_20260209`, another name, the same tool twice) is a 400 before
+Kiro is asked: with `searches: true` magpie hands every such tool to the
+plugin rather than searching for it, so dropping it would leave the search
+asked for undone. A client that sends a newer version needs
+`provider.kiro.searches: false`, so magpie's own search serves it as it did
+before; the 400 says so.
+
+The `config` hook says `searches: true` on the provider, so magpie passes a
+client's web search (Claude Code's WebSearch) on to Kiro as sent rather than
+searching for it. Set `provider.kiro.searches` to `false` to have magpie's
+own search used instead.
 
 ## Models
 
@@ -134,4 +214,3 @@ and Auto have the thinking variants.
   provider.
 - Signing in with a company's own identity provider in the browser (use
   kiro-cli's sign-in).
-- magpie's web-search stand-in for Kiro.
