@@ -1,6 +1,9 @@
 {
   "version": 1,
   "plugins": [
+    { "package": "@magpie-community/gateway-powercontext", "name": "PowerContext", "kind": "middleware", "community": true,
+      "icon": "https://raw.githubusercontent.com/oceanbase/powercontext/master/src/powercontext/server/dashboard/static/brand/favicon-color.svg",
+      "summary": { "en": "Recall from your PowerContext service and optionally save complete conversations. Configure the service URL first; capture is off by default.", "zh": "从自己的 PowerContext 服务召回记忆，并按需存回完整对话。先配置服务地址；对话存回默认关闭。" } },
     { "package": "@magpie-community/opencode-copilot-auth", "name": "GitHub Copilot", "providers": ["github-copilot"], "community": true,
       "summary": { "en": "GitHub Copilot on GitHub.com or GitHub Enterprise, with premium request or credit usage, remaining allowance and quota reset dates.", "zh": "GitHub Copilot：支持 GitHub.com 与 GitHub Enterprise，显示高级请求或积分用量、剩余额度和重置时间。" } },
     { "package": "@magpie-community/opencode-joycode-auth", "name": "JoyCode", "providers": ["joycode"], "community": true,
