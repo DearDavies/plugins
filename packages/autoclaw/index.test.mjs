@@ -223,6 +223,68 @@ test("WorkBuddy's GLM opening line and CodeBuddy Code's identity line are rewrit
   expect(messages[1].content).toBe("This conversation is powered by GLM-5.3")
 })
 
+// Hermes Agent 0.22.1 (Discord, 01huadalang, 10-30): every chat through
+// AutoClaw 国内 was a 406. The fixtures are Hermes' own strings byte for
+// byte: DEFAULT_SOUL_MD (hermes_cli/default_soul.py, the SOUL.md every
+// install is seeded with, the same as DEFAULT_AGENT_IDENTITY) and
+// HERMES_AGENT_HELP_GUIDANCE (agent/prompt_builder.py), unchanged to v0.22.5.
+test("Hermes Agent's identity lines are rewritten", () => {
+  const soul = "You are Hermes Agent, built by Nous Research. Be direct: match the length of your reply to the weight of the ask — a one-line question gets a one-line answer, and finished work gets a short report of what changed, what's verified, and what's left, never a replay of the process. No filler (\"Great question,\" \"I'd be happy to\"), no restating the request back, no re-summarizing what you already said, no narrating tool calls the user can see. Plain claims over adjectives; when unsure, say so plainly. Agree because it's right, not because the user said it. Depth is earned — give it when the user asks for detail, teaches, or the stakes demand it, not by default."
+  const help = "You run on Hermes Agent (by Nous Research). When the user needs help with Hermes itself — configuring, setting up, using, extending, or troubleshooting it — or when you need to understand your own features, tools, or capabilities, the documentation at https://hermes-agent.nousresearch.com/docs is your authoritative reference and always holds the latest, most up-to-date information. The `hermes-agent` skill has the actual commands and proven workflows — load it with skill_view(name='hermes-agent') before configuring, modifying, or troubleshooting Hermes so you don't guess or invent workarounds."
+  const opening = "You are the agent Hermes, built by Nous Research. Be direct:"
+  expect(unflagged(soul).startsWith(opening)).toBe(true)
+  expect(unflagged(soul)).toBe(opening + soul.slice("You are Hermes Agent, built by Nous Research. Be direct:".length))
+  expect(unflagged(help).startsWith("You run on Hermes-Agent (by Nous Research). When the user needs help with Hermes itself")).toBe(true)
+  // the older seeded SOUL.md and the bare name Hermes' own voice prompt uses
+  expect(unflagged("You are Hermes Agent, an intelligent AI assistant created by Nous Research.")).toBe("You are the agent Hermes, an intelligent AI assistant created by Nous Research.")
+  expect(unflagged("You are Hermes, a helpful AI assistant.")).toBe("You are the agent Hermes, a helpful AI assistant.")
+  for (const t of [soul, help, "you are hermes agent", "Intro.\nYOU ARE HERMES."]) {
+    expect(unflagged(t)).not.toMatch(/You are Hermes|Hermes Agent/i)
+  }
+  // a word that only starts with Hermes is someone else's
+  expect(unflagged("You are Hermesian")).toBe("You are Hermesian")
+  // the same text in, the same text out: a cached prompt prefix stays put
+  expect(unflagged(unflagged(soul))).toBe(unflagged(soul))
+  expect(unflagged(unflagged(help))).toBe(unflagged(help))
+
+  // other agents magpie connects, from each one's own source
+  expect(unflagged("You are Gemini CLI, an interactive CLI agent specializing in software engineering tasks.")).toBe("You are the Gemini CLI agent, an interactive CLI agent specializing in software engineering tasks.")
+  expect(unflagged("You are Kimi Code CLI, an interactive general AI agent running on a user's computer.")).toBe("You are the Kimi Code CLI agent, an interactive general AI agent running on a user's computer.")
+  expect(unflagged("You are goose, an autonomous AI agent created by AAIF (Agentic AI Foundation).")).toBe("You are the goose agent, an autonomous AI agent created by AAIF (Agentic AI Foundation).")
+  expect(unflagged("You are a general-purpose AI agent called goose")).toBe("You are a general-purpose AI agent called goose")
+})
+
+test("CN loader sends Hermes' system prompt without its identity line", async () => {
+  const soul = "You are Hermes Agent, built by Nous Research. Be direct: match the length of your reply to the weight of the ask — a one-line question gets a one-line answer, and finished work gets a short report of what changed, what's verified, and what's left, never a replay of the process. No filler (\"Great question,\" \"I'd be happy to\"), no restating the request back, no re-summarizing what you already said, no narrating tool calls the user can see. Plain claims over adjectives; when unsure, say so plainly. Agree because it's right, not because the user said it. Depth is earned — give it when the user asks for detail, teaches, or the stakes demand it, not by default."
+  const help = "You run on Hermes Agent (by Nous Research). When the user needs help with Hermes itself — configuring, setting up, using, extending, or troubleshooting it — or when you need to understand your own features, tools, or capabilities, the documentation at https://hermes-agent.nousresearch.com/docs is your authoritative reference and always holds the latest, most up-to-date information. The `hermes-agent` skill has the actual commands and proven workflows — load it with skill_view(name='hermes-agent') before configuring, modifying, or troubleshooting Hermes so you don't guess or invent workarounds."
+  const realFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (input, init) => {
+    calls.push({ url: String(input), body: JSON.parse(String(init?.body ?? "{}")) })
+    return new Response("{}")
+  }
+  try {
+    const hooks = await AutoclawCnAuthPlugin({ client: { auth: { set: async () => {} } } })
+    const loader = await hooks.auth.loader(async () => ({ type: "oauth", access: "a1" }))
+    const body = JSON.stringify({
+      model: "zaicoding_glm-5.3",
+      messages: [
+        { role: "system", content: `${soul}\n\n${help}` },
+        { role: "user", content: "You are Hermes Agent, right?" },
+      ],
+    })
+    expect((await loader.fetch("x", { method: "POST", body })).status).toBe(200)
+    const sent = calls.at(-1)
+    expect(sent.url).toBe("https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw/chat/completions")
+    expect(sent.body.messages[0].content.startsWith(`${OFFICIAL_SYSTEM_PROMPT}\n\nYou are the agent Hermes, built by Nous Research.`)).toBe(true)
+    expect(sent.body.messages[0].content).not.toMatch(/You are Hermes|Hermes Agent/i)
+    // the user's own words go as written
+    expect(sent.body.messages[1].content).toBe("You are Hermes Agent, right?")
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
 // Claude Code 2.1.30x opens its system prompt with the SDK identity line,
 // not the CLI one. The CN gateway refuses "Claude Agent SDK" in any case,
 // wherever it sits; the bare phrase is matched so "running on" variants and

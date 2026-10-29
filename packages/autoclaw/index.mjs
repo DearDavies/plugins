@@ -88,6 +88,22 @@ const FLAGGED = [
   // WorkBuddy's CLI template still opens "You are CodeBuddy Code." (#466);
   // "You are CodeBuddy" alone passes.
   [/You are CodeBuddy Code/gi, "You are the CodeBuddy Code CLI"],
+  // Hermes Agent (Nous Research) opens every chat with its SOUL.md, seeded
+  // from DEFAULT_SOUL_MD ("You are Hermes Agent, built by Nous Research. Be
+  // direct: ..."; agent/prompt_builder.py DEFAULT_AGENT_IDENTITY at v0.22.1
+  // to v0.22.5), and its help guidance says "You run on Hermes Agent (by
+  // Nous Research)". The CN gateway answers 406 for it (Discord, 10-30); the
+  // run it matches wasn't probed, so both "You are Hermes" and "Hermes Agent"
+  // are broken while the model keeps the name Hermes.
+  [/You are Hermes(?: Agent)?\b/gi, "You are the agent Hermes"],
+  [/Hermes Agent\b/gi, "Hermes-Agent"],
+  // Other agents magpie connects, whose opening line names them the same
+  // way (read from each one's source; not seen refused yet): Gemini CLI
+  // (packages/core/src/prompts/snippets.ts), the Python kimi-cli
+  // (agents/default/system.md) and goose (prompts/tiny_model_system.md).
+  [/You are Gemini CLI/gi, "You are the Gemini CLI agent"],
+  [/You are Kimi Code CLI/gi, "You are the Kimi Code CLI agent"],
+  [/You are goose\b/gi, "You are the goose agent"],
 ];
 
 function unflagged(text) {
@@ -120,7 +136,7 @@ function unflag(messages) {
 }
 
 const REFUSED_HINT =
-  "AutoClaw refuses chats whose system prompt carries another agent's identity line (Claude Code, Claude Agent SDK, Codex, opencode, Cursor, Cline, Qwen Code, ZCode, pi, DeepSeek Harness); this plugin rewrites the ones it knows, so an unknown one needs another provider in this group";
+  "AutoClaw refuses chats whose system prompt carries another agent's identity line (Claude Code, Claude Agent SDK, Codex, opencode, Cursor, Cline, Qwen Code, ZCode, pi, DeepSeek Harness, Hermes Agent); this plugin rewrites the ones it knows, so an unknown one needs another provider in this group";
 
 async function explained(res) {
   if (res.status < 400) return res;
