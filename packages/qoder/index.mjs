@@ -375,10 +375,11 @@ async function deviceSignIn(site) {
       let email = ""
       let name = ""
       let uid = dt.user_id
+      let user = null
       try {
         const ui = await openapi(site, site.userInfoPath ?? "/api/v1/userinfo", { token: dt.token })
         if (ui.status >= 200 && ui.status < 300) {
-          const user = site.normalizeUser ? site.normalizeUser(ui.json) : ui.json
+          user = site.normalizeUser ? site.normalizeUser(ui.json) : ui.json
           ;[email, name] = [user?.email ?? "", user?.name ?? ""]
           if (site.deviceOnly) uid = String(user?.id ?? user?.user_id ?? user?.uid ?? uid ?? "") || undefined
           // a VPC poll may give the token alone: the user is then the one
@@ -393,7 +394,22 @@ async function deviceSignIn(site) {
         ...chat,
         // a VPC account is told apart from the same person's public one; a
         // device-only one is shown by name, falling back to its id
-        accountId: site.vpc ? `${email || uid} (${site.vpc})` : site.deviceOnly ? email || uid || name || dt.user_id : email || dt.user_id,
+        // accountId is the account's identity in magpie (its name, proxy,
+        // model picks and caps all hang off it, and a gateway key keys its
+        // list by it), so it stays exactly what main computes: the phone is a
+        // separate field, shown by usage's `user`, never the identity.
+        accountId: site.vpc
+          ? `${email || uid} (${site.vpc})`
+          : site.deviceOnly
+            ? email || uid || name || dt.user_id
+            : email || dt.user_id,
+        // the card's names: the phone on its own, and what magpie shows (a
+        // real email first, then the phone) — never the accountId
+        ...(() => {
+          const label = phoneLabelOf(user, email, name)
+          const suffix = (v) => (v ? (site.vpc ? `${v} (${site.vpc})` : v) : "")
+          return { phoneLabel: suffix(label), cardName: suffix(realEmailOf(email) || label) }
+        })(),
         uid,
         email,
         name: name || dt.user_name || "",
@@ -430,9 +446,11 @@ async function patSignIn(site, pat) {
   let email = ""
   let name = ""
   let uid = ""
+  let user = null
   try {
     const ui = await openapi(site, "/api/v1/userinfo", { token })
     if (ui.status >= 200 && ui.status < 300) {
+      user = ui.json
       ;[email, name] = [ui.json?.email ?? "", ui.json?.name ?? ""]
       uid = String(ui.json?.id ?? ui.json?.user_id ?? ui.json?.uid ?? "")
     }
@@ -446,6 +464,8 @@ async function patSignIn(site, pat) {
     // so a renewed PAT sign-in must keep naming the same account. A suffix
     // here would add a second row beside the lapsed one instead.
     accountId: email || uid,
+    phoneLabel: phoneLabelOf(user, email, name),
+    cardName: realEmailOf(email) || phoneLabelOf(user, email, name),
     uid,
     email,
     name: name || "",
@@ -1864,6 +1884,70 @@ function signed(res, renewed) {
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
 }
 
+// ---- the card's name ----------------------------------------------------------
+//
+// The card's name is not `accountId` (a uuid is not a name, and accountId is
+// the identity magpie keys settings by). Both phone
+// sign-ins here carry the phone somewhere in their user info: Qoder CN answers
+// `security_mobile` (measured `13800138000`), QwenWork's phone accounts answer
+// only the last four digits as `name` plus a synthetic
+// `phone_<uuid>@phone.local` email (measured).
+const PHONE_EMAIL = /^phone_[0-9a-f-]+@phone\.local$/i
+
+/** A phone number as the cards show it: `0086-…`/`+86 …`/bare → `138****8000`. */
+function maskPhone(raw) {
+  let digits = String(raw ?? "").replace(/\D/g, "")
+  if (digits.startsWith("0086") && digits.length - 4 >= 7) digits = digits.slice(4)
+  else if (digits.startsWith("86") && digits.length - 2 >= 7) digits = digits.slice(2)
+  // a phone is 11 digits; a shorter run is not a number to mask
+  if (digits.length < 11) return ""
+  return `${digits.slice(0, 3)}****${digits.slice(-4)}`
+}
+
+/**
+ * What a renewal puts on the record for the card: `phoneLabel` (the phone the
+ * account signs in with, `138****8000` / `****8000`) and `cardName` (a real
+ * email first, then the phone) — both with the VPC suffix. It renames nothing:
+ * `accountId` is the identity and never changes.
+ *
+ * Read from the renewed token's user info. No cache: each renewal has a new
+ * token, so nothing is read twice (review #487, 6).
+ */
+async function refreshedNames(site, token) {
+  const key = String(token ?? "")
+  if (!key) return {}
+  try {
+    const ui = await openapi(site, site.userInfoPath ?? "/api/v1/userinfo", { token: key })
+    if (ui.status < 200 || ui.status >= 300) return {}
+    const user = site.normalizeUser ? site.normalizeUser(ui.json) : ui.json
+    const label = phoneLabelOf(user, user?.email, user?.name)
+    const suffix = (v) => (v ? (site.vpc ? `${v} (${site.vpc})` : v) : "")
+    // built as the sign-in builds it: a real email first, then the phone
+    return { phoneLabel: suffix(label), cardName: suffix(realEmailOf(user?.email) || label) }
+  } catch {
+    return {}
+  }
+}
+
+/** The account's own email, when it is a real one (a synthetic phone email is not). */
+function realEmailOf(email) {
+  const e = String(email ?? "").trim()
+  if (!e || PHONE_EMAIL.test(e)) return ""
+  return e
+}
+
+/** The phone-derived part of a card's name, or "" when the account has none. */
+function phoneLabelOf(user, email, name) {
+  const phone = maskPhone(user?.security_mobile ?? user?.phoneNumber ?? user?.phone ?? user?.mobile)
+  if (phone) return phone
+  // a synthetic phone email is never shown: its four digits are, or nothing
+  if (PHONE_EMAIL.test(String(email ?? ""))) {
+    const tail = String(name ?? "").trim()
+    if (/^\d{4}$/.test(tail)) return `****${tail}`
+  }
+  return ""
+}
+
 // changed is the fields of b that differ from a's: what auth.refresh gives.
 function changed(a, b) {
   const out = {}
@@ -2605,6 +2689,8 @@ const makePlugin = (site) => async ({ client }) => {
     try {
       const cred = await fresh(getAuth)
       if (renewed(cred)) signIn = "renewed"
+      // the card's name: magpie takes usage's `user` for it and never as a key
+      const who = cred?.cardName ? { user: cred.cardName } : {}
       // a site with its own usage path (QwenWork's account-context, signed
       // like any other call and answered with its own envelope) is read
       // there; a 401 rotates the device token once, as the qoder path does
@@ -2635,7 +2721,7 @@ const makePlugin = (site) => async ({ client }) => {
         if (site.walletsPath && ctxUser?.is_biz !== true && ctxUser?.isBiz !== true) {
           try { wallets = await read(token, site.walletsPath) } catch {}
         }
-        return { ...(site.parseUsage ? site.parseUsage(env, wallets) : { windows: [] }), signIn }
+        return { ...(site.parseUsage ? site.parseUsage(env, wallets) : { windows: [] }), signIn, ...who }
       }
       // A PAT account has no device token: the usage endpoint takes the job
       // token the exchange gave — a live PAT account answered 200 with a
@@ -2643,7 +2729,7 @@ const makePlugin = (site) => async ({ client }) => {
       // no second token here to rotate and retry with.
       if (cred.patAuth && !cred.deviceToken) {
         const env = await fetchUsage(siteOf(site, cred), cred.access)
-        return { ...(await spareFree(cred, parseUsage(env))), signIn }
+        return { ...(await spareFree(cred, parseUsage(env))), signIn, ...who }
       }
       let env
       try {
@@ -2652,7 +2738,7 @@ const makePlugin = (site) => async ({ client }) => {
         if (!(e instanceof UsageStatus) || (e.status !== 401 && e.status !== 403)) throw e
         env = await fetchUsage(siteOf(site, cred), await deviceToken(getAuth, cred.deviceToken))
       }
-      return { ...(await spareFree(cred, parseUsage(env))), signIn }
+      return { ...(await spareFree(cred, parseUsage(env))), signIn, ...who }
     } catch (e) {
       return { error: e?.message ?? String(e), signIn: e?.expired ? "expired" : signIn }
     }
@@ -2904,19 +2990,35 @@ const makePlugin = (site) => async ({ client }) => {
       refreshLead: RENEW_LEAD,
       async refresh(auth) {
         if (auth?.type !== "oauth" || !auth.access || !auth.uid || !String(auth.refresh ?? "").trim()) return undefined
-        return locked(async () => {
+        const out = await locked(async () => {
           // a request renewed it meanwhile (or magpie hasn't saved this
           // hook's last answer): what that gave, not a second refresh
           const a = latest(auth)
-          if (a.access !== auth.access && a.expires - Date.now() > RENEW_LEAD) return changed(auth, a)
+          if (a.access !== auth.access && a.expires - Date.now() > RENEW_LEAD) return { next: a, renewed: false }
           try {
-            // magpie saves what this gives
-            return changed(auth, { ...a, ...(await renew(a)) })
+            return { next: { ...a, ...(await renew(a)) }, renewed: true }
           } catch (e) {
             if (e?.expired) throw Object.assign(new Error(e.message), { signIn: "expired" })
             throw e
           }
         })
+        const fields = changed(auth, out.next)
+        if (!out.renewed) return fields
+        // The name is read outside the lock: this lock is the plugin's, shared
+        // by every account, and a user-info call may take 20 seconds — a chat
+        // from another account must not wait on it (review #487, C). The
+        // account's own site, too: a public one would send an enterprise token
+        // to the public hosts (1), and the suffix must match the sign-in (2).
+        try {
+          const s = siteOf(site, out.next)
+          const { phoneLabel, cardName } = await refreshedNames(s, out.next.access)
+          const extra = {}
+          if (phoneLabel) extra.phoneLabel = phoneLabel
+          if (cardName) extra.cardName = cardName
+          return Object.keys(extra).length ? { ...fields, ...extra } : fields
+        } catch {
+          return fields
+        }
       },
       async loader(getAuth) {
         const a = await getAuth()
@@ -3125,4 +3227,4 @@ export async function QwenWorkEnterpriseAuthPlugin({ client }) {
 export const protocol = { makePlugin, deviceSignIn, openapi, siteOf }
 
 // for tests
-export const _internal = { chatHeaders, machineOS, machineHostname, cosyHeaders, typedUnions, Splitter, campaignRuntime, RUNTIMES, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, cacheMarked, sessionOf, namedSession, taskOf, TASKS, TASK_MAX, TASK_IDLE, SESSION, SITES, decodeBody, events, QUEUE, queueState }
+export const _internal = { maskPhone, phoneLabelOf, realEmailOf, chatHeaders, machineOS, machineHostname, cosyHeaders, typedUnions, Splitter, campaignRuntime, RUNTIMES, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, cacheMarked, sessionOf, namedSession, taskOf, TASKS, TASK_MAX, TASK_IDLE, SESSION, SITES, decodeBody, events, QUEUE, queueState }

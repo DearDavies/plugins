@@ -302,6 +302,25 @@ paths, client id and protocol are the public ones:
 The hosts and reply shapes come from a real VPC account's report
 (yetone/magpie#312). This plugin has not been tried with a VPC account.
 
+## The card's name
+
+An account signed in with a phone is shown by that phone — masked, `138****8000` — not by
+its `accountId`, which is a uuid. Qoder CN's user info answers the number as `security_mobile`
+(measured `13800138000`), so that is what the card takes.
+
+QwenWork's phone accounts answer only the last four digits, as `name`, beside a synthetic
+`phone_<uuid>@phone.local` email (measured): the card shows `****8000` and never that email.
+An email sign-in keeps its email.
+
+`accountId` stays the account's identity — what magpie keys the user's own name for
+it, its proxy, model picks, caps and a gateway key's account list by — so it never
+changes: it is what a sign-in and every renewal give back. The card's name is usage's
+`user`, a field magpie shows and never keys by.
+
+A sign-in reads the user info, and a renewal reads it again (outside the token lock),
+so an account stored by an earlier version shows the phone on the card at its next
+renewal. A failed read changes nothing and never costs a sign-in.
+
 ## QwenWork (千问办公)
 
 `QwenWork` and `QwenWork 企业版` serve Alibaba's own QwenWork (qwenwork.cn)
