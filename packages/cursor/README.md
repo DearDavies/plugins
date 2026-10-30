@@ -259,6 +259,19 @@ own spends the team's pool: On-demand shows the pool's spend and limit,
 with the member's own spend beside it, and the account is used up when
 the pool is.
 
+Free credit shows too, as Cursor's own IDE reads it. The plan's bonus
+("+$X free usage on us", `GetCurrentPeriodUsage`'s `bonusSpend` and
+`remainingBonus`) is Free usage: what was spent from it this period, and
+whether more is left; Cursor gives no amount for it. Each credit grant
+(`GetUsageLimitStatusAndActiveGrants`' `activeGrants`, the IDE's "Use your
+$X free credits") is a window of its own, named by its campaign: spent of
+total, when it expires, and its limits. A grant limited to some models
+lists them; one only Cursor's Cloud Agents (or another client) may spend
+says so in its name, since magpie talks as `cursor-agent`. While a bonus
+or a grant magpie can spend has some left, a spent included pool doesn't
+count the account used up for the models it pays for. With "Included
+usage only" on, free credit is shown only.
+
 An Enterprise account's period has no Cursor Models, Other Models or Total
 in `GetCurrentPeriodUsage`: Cursor reports its overall allowance through
 the website's `usage-summary` instead. Magpie shows that as Enterprise,

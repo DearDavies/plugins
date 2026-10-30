@@ -541,6 +541,99 @@ async function hardLimit(tok) {
 // dollars, thousands grouped: a team's pool runs to six figures ($451,200.00)
 const dollars = (n) => "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
+// ---- free credit ------------------------------------------------------------------
+//
+// Cursor gives free usage two ways (CryptoSarom on X, "赠金"), as Cursor
+// 3.x's own client reads them:
+//
+// - the plan's bonus, "+$X free usage on us" under the included usage in
+//   the IDE's usage tooltip: GetCurrentPeriodUsage's planUsage.bonusSpend
+//   (cents spent from it this period), remainingBonus (whether any is
+//   left; no amount is given) and bonusTooltip ("We work with model
+//   providers to give you free usage beyond what you've purchased. Amounts
+//   may vary."). It isn't tied to a model.
+// - credit grants, the IDE's "Use your $X free … credits" banner:
+//   DashboardService/GetUsageLimitStatusAndActiveGrants' activeGrants, each
+//   with totalCents and remainingCents (int64 strings), expiresAtMs, and
+//   its limits: allowedModelIds, allowedModelTags and allowedModelSelections
+//   (the models it may be spent on; none listed is every model) and
+//   allowedClientTypes (the clients that may spend it; none listed is any;
+//   "glass" without "ide" is the IDE's Cloud Agent credits). magpie talks
+//   as cursor-agent, clientType "cli".
+//
+// creditGrants is that reply's activeGrants, [] when it couldn't be read.
+async function creditGrants(tok) {
+  try {
+    const res = await fetch(API + "/aiserver.v1.DashboardService/GetUsageLimitStatusAndActiveGrants", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${tok}`, "Content-Type": "application/json", "Connect-Protocol-Version": "1", ...await teamHeader(tok) },
+      body: "{}",
+      signal: AbortSignal.timeout(15_000),
+    })
+    if (!res.ok) return []
+    const g = (await res.json())?.activeGrants
+    return Array.isArray(g) ? g : []
+  } catch {
+    return []
+  }
+}
+
+// tagOf is a model name as the IDE matches a grant's allowedModelTags to
+// it: lower case, "-" read as "."; a tag matches a name it is part of.
+const tagOf = (s) => String(s).toLowerCase().replace(/-/g, ".")
+
+// credits are the windows of the account's free credit, and what it lets
+// Cursor go on serving once the included usage is spent: all (a bonus or
+// grant magpie can spend on every model still has some left) and covers
+// (the account's model ids a grant limited to some models still pays
+// for). Every credit window is shown only: what stops an account is the
+// included usage it outlasts, which usage() sets aside. plan is
+// planUsage, resets its period's end, ids the account's model ids.
+function credits(plan, grants, ids, resets, now = Date.now()) {
+  const windows = []
+  const covers = new Set()
+  let all = false
+  const bonus = Number(plan?.bonusSpend ?? 0) / 100
+  if (bonus > 0 || plan?.remainingBonus === true) {
+    windows.push({ name: "Free usage", used: 0, display: `+${dollars(bonus)} on us` + (plan?.remainingBonus === true ? ", more left" : ""), ...resets, aside: true })
+    if (plan?.remainingBonus === true) all = true
+  }
+  for (const g of grants) {
+    const total = Number(g?.totalCents ?? 0) / 100
+    const left = Math.max(0, Number(g?.remainingCents ?? 0) / 100)
+    if (!(total > 0) || !Number.isFinite(total) || !Number.isFinite(left)) continue
+    const exp = Number(g.expiresAtMs ?? 0)
+    if (exp > 0 && exp <= now) continue
+    const clients = (g.allowedClientTypes ?? []).map(String)
+    const mine = clients.length === 0 || clients.includes("cli")
+    const named = [...(g.allowedModelIds ?? []), ...(g.allowedModelSelections ?? []).map((m) => m?.modelId).filter(Boolean)].map(String)
+    const tags = (g.allowedModelTags ?? []).map(String)
+    const limited = named.length > 0 || tags.length > 0
+    const bases = new Set(named.map((m) => (poolBase(m) === "auto" ? "default" : poolBase(m))))
+    const fits = (id) => {
+      const b = poolBase(id) === "auto" ? "default" : poolBase(id)
+      return bases.has(b) || tags.some((t) => tagOf(id).includes(tagOf(t)))
+    }
+    const matched = limited ? ids.filter(fits) : []
+    const name = (String(g.campaignName ?? "").trim() || "Free credit") + (mine ? "" : clients.includes("glass") && !clients.includes("ide") ? " (Cloud Agents only)" : ` (${clients.join(", ")} only)`)
+    windows.push({
+      name,
+      used: Math.max(0, Math.min(100, (100 * (total - left)) / total)),
+      display: `${dollars(total - left)} / ${dollars(total)}`,
+      amount: total - left,
+      limit: total,
+      unit: "USD",
+      ...(exp > 0 ? { runsOutAt: new Date(exp).toISOString(), runsOut: left } : {}),
+      ...(limited ? { models: matched.length ? matched : [...named, ...tags] } : {}),
+      aside: true,
+    })
+    if (!mine || !(left > 0)) continue
+    if (!limited) all = true
+    else for (const id of matched) covers.add(id)
+  }
+  return { windows, all, covers }
+}
+
 // INCLUDED_ONLY is the switch (magpie's plugin options, off by default)
 // that keeps an account in routing only while its included usage lasts
 // (magpie-community/plugins#485): on, the included pools (Cursor Models and
@@ -638,13 +731,14 @@ async function usage(tok, ids, includedOnly = false, plan = undefined) {
     }),
     hardLimit(tok),
   ])
+  const grants = creditGrants(tok)
   if (!res.ok) return { error: statusText(res.status), windows: [] }
   const data = await res.json()
   const u = data?.planUsage
   if (!u) {
     // Prefer measured Enterprise usage before any reset-date-only fallback.
     const windows = await enterpriseUsage(tok, includedOnly)
-    return windows ? { windows } : { windows: [] }
+    return { windows: windows ?? [], credits: credits(undefined, await grants, ids, {}).windows }
   }
   const ms = /^[+-]?\d+$/.test(data.billingCycleEnd ?? "") ? Number(data.billingCycleEnd) : 0
   const resets = ms > 0 ? { resetsAt: new Date(ms).toISOString() } : {}
@@ -665,10 +759,16 @@ async function usage(tok, ids, includedOnly = false, plan = undefined) {
   const pool = [...new Set(["auto", ...asked, ...(data.autoBucketModels ?? [])])].filter(inPool)
   const num = (v) => (typeof v === "number" ? v : 0)
   const od = onDemandOf(data, hard)
-  const pooled = !includedOnly && (od.kind === "fixed" || od.kind === "unlimited") ? { aside: true } : {}
+  // free credit that magpie can spend on every model keeps the account
+  // served past its included usage, as on-demand that can pay does; one
+  // limited to some models keeps those models served past a spent pool.
+  // Neither does with includedOnly.
+  const free = credits(u, await grants, [...new Set(asked)], resets)
+  const pooled = !includedOnly && (od.kind === "fixed" || od.kind === "unlimited" || free.all) ? { aside: true } : {}
+  const covers = includedOnly ? new Set() : free.covers
   const onDemand =
     od.kind === "fixed"
-      ? [{ name: "On-demand", used: Math.max(0, Math.min(100, (100 * od.usedDollars) / od.limitDollars)), display: `${dollars(od.usedDollars)} / ${dollars(od.limitDollars)}` + (od.mineDollars === undefined ? "" : ` (you: ${dollars(od.mineDollars)})`), ...resets, ...(includedOnly ? { aside: true } : {}) }]
+      ? [{ name: "On-demand", used: Math.max(0, Math.min(100, (100 * od.usedDollars) / od.limitDollars)), display: `${dollars(od.usedDollars)} / ${dollars(od.limitDollars)}` + (od.mineDollars === undefined ? "" : ` (you: ${dollars(od.mineDollars)})`), ...resets, ...(includedOnly || free.all ? { aside: true } : {}) }]
       : od.kind === "unlimited"
         ? [{ name: "On-demand", used: 0, display: dollars(od.usedDollars), ...resets, aside: true }]
         : []
@@ -676,23 +776,33 @@ async function usage(tok, ids, includedOnly = false, plan = undefined) {
   // model draws on, which the dashboard shows as the period's
   // totalPercentUsed, autoPercentUsed the same and apiPercentUsed 0 always.
   const info = await plan
+  // spent is whether a pool no longer pays: then the models a credit still
+  // pays for are left out of it
+  const spent = (used) => covers.size > 0 && !pooled.aside && used >= 100
   if (info?.merged === true) {
     const weekly = info.period === "weekly"
+    const used = num(u.totalPercentUsed)
     return {
       windows: [
-        { name: weekly ? "Weekly" : info.period === "monthly" ? "Monthly" : "Included", used: num(u.totalPercentUsed), ...resets, ...(weekly ? { span: 604800 } : {}), ...pooled },
+        { name: weekly ? "Weekly" : info.period === "monthly" ? "Monthly" : "Included", used, ...resets, ...(weekly ? { span: 604800 } : {}), ...(spent(used) ? { notModels: [...covers] } : {}), ...pooled },
         ...onDemand,
       ],
+      credits: free.windows,
     }
   }
-  // the two pools fit the line; the total goes in its tooltip
+  // the two pools fit the line; the total goes in its tooltip. A spent
+  // Cursor Models pool every model of which a credit pays for is aside:
+  // an empty models list would count every model.
+  const auto = num(u.autoPercentUsed), api = num(u.apiPercentUsed)
+  const cursorModels = spent(auto) ? pool.filter((m) => !covers.has(m)) : pool
   return {
     windows: [
-      { name: "Cursor Models", used: num(u.autoPercentUsed), ...resets, models: pool, ...pooled },
-      { name: "Other Models", used: num(u.apiPercentUsed), ...resets, notModels: pool, ...pooled },
+      { name: "Cursor Models", used: auto, ...resets, models: cursorModels.length ? cursorModels : pool, ...(cursorModels.length ? pooled : { aside: true }) },
+      { name: "Other Models", used: api, ...resets, notModels: spent(api) ? [...new Set([...pool, ...covers])] : pool, ...pooled },
       ...onDemand,
       { name: "Total", used: num(u.totalPercentUsed), ...resets, aside: true },
     ],
+    credits: free.windows,
   }
 }
 
@@ -3257,7 +3367,7 @@ export async function CursorAuthPlugin(input) {
           key: INCLUDED_ONLY,
           label: "Included usage only",
           description:
-            "Keeps an account in routing only while its included usage lasts: once an included pool (Cursor Models, Other Models, a newer plan's Weekly) is used up, magpie moves its models to the next account until it resets, even if on-demand could pay. On-demand and Total never keep an account in routing.",
+            "Keeps an account in routing only while its included usage lasts: once an included pool (Cursor Models, Other Models, a newer plan's Weekly) is used up, magpie moves its models to the next account until it resets, even if on-demand or free credit could pay.",
         },
       ],
       // magpie's: how much of the plan's included usage is gone (the plan
@@ -3276,9 +3386,11 @@ export async function CursorAuthPlugin(input) {
         // before an On-demand with no limit, which is only a dollar figure on
         // a ring that never fills (magpie #2213, Morganwan90). An On-demand
         // with a limit stays ahead of it: that is what can stop the account.
+        // Free credit goes after them, with Total: it is shown only.
         const last = (w) => w.name === "Total" || (w.name === "On-demand" && w.aside)
-        const windows = [...u.windows.filter((w) => !last(w)), ...bot, ...u.windows.filter(last)]
-        return { ...u, windows, ...(plan ? { plan } : {}), signIn: "kept" }
+        const { credits: free = [], ...read } = u
+        const windows = [...read.windows.filter((w) => !last(w)), ...bot, ...free, ...read.windows.filter(last)]
+        return { ...read, windows, ...(plan ? { plan } : {}), signIn: "kept" }
       },
     },
     // the session the request is part of, for the conversation_id
@@ -3320,4 +3432,4 @@ export async function CursorAuthPlugin(input) {
 }
 
 // for tests
-export const _internal = { kvReply, listFor, lists, keychain, keychainToken, nativeTransport, onDemandOf,resetH1: () => (h1Until = 0), onH1: () => Date.now() < h1Until, resetTeam: () => { teamRead.at = 0; teamRead.info = null }, expireTeam: () => (teamRead.at = 0),H2, H1, h2Blocked, open, openH1, openH2, STEP_WAIT, stepUsage, usageKey, ledger, owed, flights, misses, unreadable, catalog, usable, request, modelsOf, tokensOf, maxRequired, conversationID, usageOf, sessionOf, SESSION, errorResponse, kept, poolBase, conversation, buildRun, decode, exec, fields, pb, pbValue, pbAny, frame, frames, failure, toolsOf, expiry }
+export const _internal = { credits, kvReply, listFor, lists, keychain, keychainToken, nativeTransport, onDemandOf,resetH1: () => (h1Until = 0), onH1: () => Date.now() < h1Until, resetTeam: () => { teamRead.at = 0; teamRead.info = null }, expireTeam: () => (teamRead.at = 0),H2, H1, h2Blocked, open, openH1, openH2, STEP_WAIT, stepUsage, usageKey, ledger, owed, flights, misses, unreadable, catalog, usable, request, modelsOf, tokensOf, maxRequired, conversationID, usageOf, sessionOf, SESSION, errorResponse, kept, poolBase, conversation, buildRun, decode, exec, fields, pb, pbValue, pbAny, frame, frames, failure, toolsOf, expiry }

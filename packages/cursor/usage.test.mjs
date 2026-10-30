@@ -412,6 +412,8 @@ test("a team's org-wide on-demand pool is the allowance: its spend is shown, and
       { name: "Cursor Models", used: 57.81428571428572, resetsAt: at, aside: true },
       { name: "Other Models", used: 100, resetsAt: at, aside: true },
       { name: "On-demand", used: (100 * 6334270) / 45120000, display: "$63,342.70 / $451,200.00 (you: $198.55)", resetsAt: at },
+      // its bonusSpend: the IDE's "+$141.51 free usage on us"
+      { name: "Free usage", used: 0, display: "+$141.51 on us", resetsAt: at, aside: true },
       { name: "Total", used: 64.604, resetsAt: at, aside: true },
     ])
   }
