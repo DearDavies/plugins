@@ -574,6 +574,24 @@ function account(client) {
 // ---- models ----------------------------------------------------------------------
 
 const windows = new Map() // a model's context, as Kiro last listed it
+const natives = new Map() // a model's effort levels sent as fields, as Kiro last listed them (nativeOf)
+
+// nativeOf is what a model's additionalModelRequestFieldsSchema in Kiro's
+// list offers, read as Kiro IDE reads it: the effort levels in the enum of
+// output_config's (or reasoning's) effort, and whether thinking.type may be
+// "adaptive". A model offering both is sent the caller's effort in
+// additionalModelRequestFields, as the IDE sends it; any other keeps the
+// <max_thinking_length> budget (#538).
+function nativeOf(s) {
+  if (!s || typeof s !== "object" || Array.isArray(s)) return undefined
+  const types = s.properties?.thinking?.properties?.type?.enum
+  if (!Array.isArray(types) || !types.includes("adaptive")) return undefined
+  for (const path of ["output_config", "reasoning"]) {
+    const levels = s.properties?.[path]?.properties?.effort?.enum
+    if (Array.isArray(levels) && levels.length) return { path, levels }
+  }
+  return undefined
+}
 
 const thinks = (id) => /claude/i.test(id) || id === "auto"
 // the levels a thinking model offers, as the built-in thinks them (xhigh as
@@ -653,6 +671,7 @@ async function listModels(a) {
   }
   if (!list.length) throw new Error("Kiro listed no models")
   for (const m of list) windows.set(m.id, m.context)
+  for (const m of out?.models ?? []) if (m?.modelId) natives.set(m.modelId, nativeOf(m.additionalModelRequestFieldsSchema))
   return list
 }
 
@@ -834,6 +853,17 @@ function thinking(req, model) {
   return 20000
 }
 
+// nativeFields is the additionalModelRequestFields a thinking request is
+// sent with when Kiro's list says the model takes its effort as a field:
+// adaptive thinking at the caller's level, so xhigh and max reach the model
+// as two levels rather than one 50000 budget (#538). undefined otherwise.
+function nativeFields(req, model) {
+  const n = natives.get(model)
+  const effort = req.output_config?.effort
+  if (!n || typeof effort !== "string" || !n.levels.includes(effort) || !thinking(req, model)) return undefined
+  return { thinking: { type: "adaptive" }, [n.path]: { effort } }
+}
+
 // formatText is the structured output a request asks for, said in words:
 // Anthropic's output_config.format (or the AI SDK's output_format) with a
 // JSON schema, "" when it asks for none. A JSON object with no schema
@@ -872,6 +902,34 @@ async function kiroBody(req, model, profile, budget) {
   return JSON.stringify(await fitImages(kiroRequest(req, model, profile, budget)))
 }
 
+// UNDERSTOOD is the reply Kiro IDE puts in its history where a turn has
+// none of its own, before the message being answered
+const UNDERSTOOD = "Understood."
+
+// contextFirst is a conversation that ends in system messages (Claude
+// Code's environment context, sent after the user's question) with that
+// context said first: a turn of its own, answered by Kiro IDE's
+// placeholder, before the question, which stays the message being
+// answered rather than the head of "question, then context" (#538). The
+// instructions' own field isn't used: Kiro refuses it ("systemPrompt field
+// is not enabled for this user"). A question carrying tool results, or
+// following tool calls, keeps the context in it as before, so no call is
+// parted from its result.
+function contextFirst(messages) {
+  let end = messages.length
+  while (end > 0 && messages[end - 1]?.role === "system") end--
+  if (end === messages.length) return messages
+  let start = end
+  while (start > 0 && messages[start - 1]?.role === "user") start--
+  const parts = (m) => (typeof m?.content === "string" ? [{ type: "text", text: m.content }] : Array.isArray(m?.content) ? m.content : [])
+  const context = messages.slice(end)
+  if (start === end || !context.some((m) => parts(m).some((p) => p?.type !== "text" || p.text))) return messages
+  const turn = messages.slice(start, end)
+  if (turn.some((m) => parts(m).some((p) => p?.type === "tool_result"))) return messages
+  if (parts(messages[start - 1]).some((p) => p?.type === "tool_use" || p?.type === "server_tool_use" || p?.type === "web_search_tool_result")) return messages
+  return [...messages.slice(0, start), ...context.map((m) => ({ ...m, role: "user" })), { role: "assistant", content: UNDERSTOOD }, ...turn]
+}
+
 function kiroRequest(req, model, profile, budget) {
   const entries = []
   // the messages the caller marked for its prompt cache (cache_control),
@@ -882,7 +940,7 @@ function kiroRequest(req, model, profile, budget) {
   }
   const user = () => ({ content: "", modelId: model, origin: "KIRO_CLI" })
   const resultsOnly = new WeakSet() // the messages made to carry a reply's web search results
-  for (const m of req.messages ?? []) {
+  for (const m of contextFirst(req.messages ?? [])) {
     const parts = typeof m.content === "string" ? [{ type: "text", text: m.content }] : m.content ?? []
     const texts = []
     if (m.role === "assistant") {
@@ -1013,7 +1071,9 @@ function kiroRequest(req, model, profile, budget) {
   // end of the instructions, as magpie's built-in tells it (inSystem)
   const format = formatText(req)
   if (format) system = system ? system + "\n\n" + format : format
-  if (budget) system = `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>` + (system ? "\n" + system : "")
+  // a level Kiro takes as a field is sent as one, not also as a budget
+  const native = budget ? nativeFields(req, model) : undefined
+  if (budget && !native) system = `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>` + (system ? "\n" + system : "")
   if (system) entries[0].userInputMessage.content = system + "\n\n" + entries[0].userInputMessage.content
   if (Array.isArray(req.system)) mark(entries[0].userInputMessage, req.system)
 
@@ -1063,6 +1123,7 @@ function kiroRequest(req, model, profile, budget) {
   if (entries.length > 1) state.history = entries.slice(0, -1)
   const out = { conversationState: state, agentMode: "vibe" }
   if (profile) out.profileArn = profile
+  if (native) out.additionalModelRequestFields = native
   return out
 }
 
@@ -2309,4 +2370,4 @@ export async function KiroAuthPlugin({ client } = {}) {
 }
 
 // for tests
-export const _internal = { generate, refresh, usageOf, buildKiro, kiroBody, IMAGE_LIMIT, events, reply, failure, toolID, toolName, toolNames, thinking, configModel, runtimeModel, readCLI, readIDE, regionOf, planName, frames }
+export const _internal = { generate, refresh, usageOf, buildKiro, kiroBody, IMAGE_LIMIT, events, reply, failure, toolID, toolName, toolNames, thinking, nativeFields, listModels, contextFirst, configModel, runtimeModel, readCLI, readIDE, regionOf, planName, frames }

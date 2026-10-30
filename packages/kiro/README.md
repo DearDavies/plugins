@@ -108,6 +108,10 @@ request:
   profile ARN names.
 - It turns the request into a Kiro conversation:
   - The system prompt goes at the head of the first message.
+  - System messages that end the conversation (Claude Code's environment
+    context) are sent as a turn before the question, answered by Kiro IDE's
+    "Understood.", so the question is the message answered (#538). After
+    tool results they stay with them.
   - Tool calls and results are paired: an unanswered call gets an error
     result, and a result longer than 250,000 characters is cut.
   - Tool ids Kiro wouldn't take are rewritten. A tool name over 64
@@ -136,6 +140,11 @@ request:
   the prompt, with a budget: low 10k, medium 20k, high 30k, xhigh and max
   50k (as magpie's built-in Kiro: #120). The
   `<thinking>` block of the reply comes back as thinking.
+  A model whose Kiro catalog lists effort levels with adaptive thinking
+  (`additionalModelRequestFieldsSchema`) is sent the level instead, as Kiro
+  IDE sends it: `additionalModelRequestFields` with `thinking.type:
+  "adaptive"` and `output_config.effort` (or `reasoning.effort`), and no
+  budget. So xhigh and max stay apart there (#538).
 - Anthropic's hosted web search is answered with Kiro's own web search
   (see [Web search](#web-search)).
 - Kiro's failures keep their meaning:
