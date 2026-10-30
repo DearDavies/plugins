@@ -64,10 +64,44 @@ const signIn = async (account, accounts) => {
 }
 
 test("signing in as an enterprise keeps the enterprise WorkBuddy named", async () => {
-  const { result, asked } = await signIn({ uid: "u", nickname: "n", type: "ultimate", enterpriseId: "ent-1" }, [])
+  const { result, asked } = await signIn(
+    { uid: "u", nickname: "n", type: "ultimate", enterpriseId: "ent-1", enterpriseName: "WorkBuddy 教育公益版" },
+    [],
+  )
   expect(result.type).toBe("success")
   expect(result.enterpriseId).toBe("ent-1")
+  expect(result.accountId).toBe("n · WorkBuddy 教育公益版")
   expect(asked.some((p) => p.endsWith("/accounts"))).toBe(false)
+})
+
+test("an enterprise named by id only takes its name from the account list", async () => {
+  const { result } = await signIn({ uid: "u", nickname: "n", type: "ultimate", enterpriseId: "ent-1" }, [
+    { uid: "u", type: "personal" },
+    { uid: "u", type: "ultimate", enterpriseId: "ent-1", enterpriseName: "某某中学" },
+  ])
+  expect(result.enterpriseId).toBe("ent-1")
+  expect(result.accountId).toBe("n · 某某中学")
+})
+
+test("an enterprise WorkBuddy names nowhere is told apart by its id", async () => {
+  const { result } = await signIn({ uid: "u", nickname: "n", type: "ultimate", enterpriseId: "ent-123456789" }, [])
+  expect(result.enterpriseId).toBe("ent-123456789")
+  expect(result.accountId).toBe("n · enterprise 456789")
+})
+
+// One person's personal and education accounts share the uid and the
+// nickname; magpie keeps one account per name and uid, so the two names
+// must differ or the second sign-in replaces the first.
+test("a person's personal and enterprise sign-ins are named apart", async () => {
+  const list = [
+    { uid: "u", type: "personal", lastLogin: false },
+    { uid: "u", type: "ultimate", enterpriseId: "ent-2", enterpriseName: "WorkBuddy 教育公益版", lastLogin: true },
+  ]
+  const personal = (await signIn({ uid: "u", nickname: "n", type: "personal" }, list)).result
+  const edu = (await signIn({ uid: "u", nickname: "n", type: "ultimate" }, list)).result
+  expect(personal.accountId).toBe("n")
+  expect(edu.accountId).toBe("n · WorkBuddy 教育公益版")
+  expect(personal.uid).toBe(edu.uid)
 })
 
 test("an enterprise account named without its id is found in the account list", async () => {

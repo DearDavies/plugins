@@ -415,16 +415,26 @@ function enterpriseHeaders(a) {
   return id ? { "X-Enterprise-Id": id, "X-Tenant-Id": id } : {}
 }
 
-// enterpriseOf is the enterprise the account a sign-in gave belongs to:
-// the one /login/account names, else, for an account that isn't personal,
-// the one WorkBuddy's account list has for it — the same choice WorkBuddy's
-// own client makes (mergeCurrentAccountDetails): the uid's only entry of that
-// type, or the only one it last signed in to. None found is personal.
+// enterpriseOf is the enterprise the account a sign-in gave belongs to,
+// { id, name }: the one /login/account names, else, for an account that
+// isn't personal, the one WorkBuddy's account list has for it — the same
+// choice WorkBuddy's own client makes (mergeCurrentAccountDetails): the
+// uid's only entry of that type, or the only one it last signed in to. None
+// found is personal ({ id: "" }).
+//
+// Which account that is was chosen on WorkBuddy's sign-in page: after a
+// phone sign-in it lists the person's accounts (personal, a team,
+// 「WorkBuddy 教育公益版」…) and binds the one picked to the sign-in's state
+// (POST /console/login/enterprise/<id>?state=…), so the token and
+// /login/account this plugin reads by that state are the chosen account's.
 async function enterpriseOf(site, a, who) {
+  const name = (x) => (typeof x?.enterpriseName === "string" ? x.enterpriseName.trim() : "")
   const own = typeof who?.enterpriseId === "string" ? who.enterpriseId.trim() : ""
-  if (own) return own
   const type = String(who?.type ?? "").trim().toLowerCase()
-  if (!type || type === "personal") return ""
+  if (!own && (!type || type === "personal")) return { id: "", name: "" }
+  // a name /login/account leaves out is the account list's, as the
+  // client merges the two
+  if (own && name(who)) return { id: own, name: name(who) }
   let list
   try {
     list = await call(site, "GET", "/v2/plugin/accounts", {
@@ -432,13 +442,29 @@ async function enterpriseOf(site, a, who) {
       "X-Domain": domainOf(site, a),
     })
   } catch {
-    return ""
+    return { id: own, name: "" }
   }
   const mine = (list?.accounts ?? []).filter((x) => x?.uid === who.uid && typeof x.enterpriseId === "string" && x.enterpriseId.trim())
+  if (own) return { id: own, name: name(mine.find((x) => x.enterpriseId.trim() === own)) }
   const same = mine.filter((x) => String(x.type ?? "").trim().toLowerCase() === type)
   const last = mine.filter((x) => x.lastLogin)
   const pick = same.length === 1 ? same[0] : last.length === 1 ? last[0] : mine.length === 1 ? mine[0] : undefined
-  return pick ? pick.enterpriseId.trim() : ""
+  return pick ? { id: pick.enterpriseId.trim(), name: name(pick) } : { id: "", name: "" }
+}
+
+// accountName is what magpie lists an account a sign-in gave as: the
+// person's name, and for an enterprise (team, education) account the
+// enterprise's too. One person's personal account and their enterprise one
+// share the uid and the nickname, and magpie's plugin host keeps one
+// account per name and uid (settle in host.js): named alike, signing in to
+// 「WorkBuddy 教育公益版」 took the place of the same person's personal
+// account, and the two could never be in one pool. An enterprise WorkBuddy
+// names no name for is told by the end of its id.
+function accountName(who, ent) {
+  const person = who?.nickname || who?.phoneNumber || who?.uid || ""
+  if (!ent?.id) return person
+  const team = ent.name || `enterprise ${ent.id.slice(-6)}`
+  return person ? `${person} · ${team}` : team
 }
 
 // WorkBuddy's own client names each chat to its gateway four ways: the
@@ -1541,8 +1567,9 @@ async function browserSignIn(site) {
           "X-No-Enterprise-Id": "true",
         }, [12151], deadline)
         a.uid = who.uid ?? ""
-        a.enterpriseId = await enterpriseOf(site, a, who)
-        return success(site, a, who.nickname || who.phoneNumber || who.uid)
+        const ent = await enterpriseOf(site, a, who)
+        a.enterpriseId = ent.id
+        return success(site, a, accountName(who, ent))
       } catch (e) {
         return { type: "failed", error: e.message }
       }
@@ -3504,4 +3531,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { idFor, replyAfterToolsOn, withDefaultEffort, defaultEffortOf, gzipped, FREE_ONLY, PRICE_TTL, keyAccount, remoteConfig, cycleOf, typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, asReasoning, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, scopeOf, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, prepared, answeredBefore, nativeOf, modelOf, configModels, freeWindowOf, tokensShort, freeWindowRows, freeWindowLedger, readLedgerTail, pinned, rowTime, rowAccount, ofAccount, windowOffset, windowReset, FREE_WINDOW_MODELS, FREE_WINDOW_SPAN, FREE_WINDOW_GAP, FREE_WINDOW_LEAD, checkinOf, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }
+export const _internal = { idFor, replyAfterToolsOn, withDefaultEffort, defaultEffortOf, gzipped, FREE_ONLY, PRICE_TTL, keyAccount, remoteConfig, cycleOf, typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, accountName, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, asReasoning, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, scopeOf, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, prepared, answeredBefore, nativeOf, modelOf, configModels, freeWindowOf, tokensShort, freeWindowRows, freeWindowLedger, readLedgerTail, pinned, rowTime, rowAccount, ofAccount, windowOffset, windowReset, FREE_WINDOW_MODELS, FREE_WINDOW_SPAN, FREE_WINDOW_GAP, FREE_WINDOW_LEAD, checkinOf, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }

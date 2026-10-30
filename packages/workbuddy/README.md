@@ -61,6 +61,19 @@ as WorkBuddy's own client sends them; without them WorkBuddy answers as the
 personal account, with the personal plan's models. A browser sign-in made
 before 0.1.13 has no enterprise id kept: sign in again.
 
+Which account a browser sign-in gives is chosen on WorkBuddy's own sign-in
+page. After a phone sign-in it lists the person's accounts (personal, a
+team, 「WorkBuddy 教育公益版」…) and binds the one picked to the sign-in, so
+to add an education or team account, pick it there. Its account is named
+with the enterprise too (`nickname · enterprise name`, or the end of the
+enterprise id when WorkBuddy names none): one person's personal and
+enterprise accounts share the uid and the nickname, and magpie keeps one
+account per name and uid, so before 0.2.1 signing in to the enterprise
+account replaced the personal one. An enterprise account signed in before
+0.2.1 keeps its old name until its Sign in again, which renames it in
+place; its free-model window, read from usage rows kept under the old
+name, starts again from the new one.
+
 Desktop's sign-in is refreshed only when the app hasn't refreshed it
 itself, and the new token is kept in memory, never written back, as magpie's
 built-in WorkBuddy does.
