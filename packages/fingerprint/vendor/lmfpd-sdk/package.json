@@ -1,0 +1,38 @@
+{
+  "name": "lmfpd-sdk",
+  "description": "Language model fingerprint detection: score saved replies or run a live detection round",
+  "type": "module",
+  "license": "MIT",
+  "homepage": "https://lm.ikale.io",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ikaleio/lm-detector.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Ikaleio/lm-detector/issues"
+  },
+  "exports": {
+    ".": {
+      "types": "./types/sdk/ts/src/index.d.ts",
+      "import": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "types",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22",
+    "bun": ">=1.4.2"
+  },
+  "keywords": [
+    "llm",
+    "fingerprint",
+    "model-detection",
+    "sdk"
+  ],
+  "version": "0.2.0",
+  "gitHead": "1e58ed83c1cde17f88cba89560ad4d083042ae92"
+}
