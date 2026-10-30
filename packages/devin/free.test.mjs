@@ -65,3 +65,58 @@ test("the list marks SWE-2 free and nothing else", async () => {
   expect(got["swe-2"].free).toBe(true)
   expect(got["gemini-4-argon"].free).toBeUndefined()
 })
+
+// zws13579 on magpie's Discord (devin 0.1.26): a Free plan account couldn't
+// get SWE-2 through the plugin. No Free plan response has been captured;
+// these hold the paths that would hide SWE-2 whatever its shape.
+
+const swe2 = (ids) => ({ uid: "swe-2", label: "SWE-2", aliases: ["swe"], models: ids.map((id) => ({ id, name: id, context: 262000, output: 128000 })) })
+
+test("SWE-2 with no effort goes as a free variant, not a -lightning one Devin lists first", () => {
+  const fams = [swe2(["swe-2-medium-lightning", "swe-2-high", "swe-2-medium", "swe-2-max"])]
+  expect(_internal.variantFor(fams, "swe-2", "")).toBe("swe-2-high")
+  expect(_internal.variantFor(fams, "swe-2", "medium")).toBe("swe-2-medium")
+  const free = new Set(["swe-2-high", "swe-2-medium", "swe-2-max"])
+  expect(_internal.listed(fams, [], {}, free).find((m) => m.id === "swe-2").free).toBe(true)
+})
+
+test("Devin's own list (2026-10-15, with -lightning variants) sends SWE-2 as swe-2-high", () => {
+  const fams = _internal.parseConfigFamilies(new Uint8Array(readFileSync(join(import.meta.dir, "testdata", "model-configs-1015.bin"))))
+  expect(_internal.variantFor(fams, "swe-2", "")).toBe("swe-2-high")
+})
+
+test("SWE-2 the account's list leaves out goes as SNAPSHOT's variant, not the bare family id", () => {
+  const fams = [{ uid: "kimi-k3", label: "Kimi K3", aliases: [], models: [{ id: "kimi-k3-high", name: "Kimi K3 High", context: 0, output: 0 }] }]
+  expect(_internal.variantFor(fams, "swe-2", "")).toBe("swe-2-high")
+  expect(_internal.variantFor(fams, "swe-2", "max")).toBe("swe-2-max")
+  expect(_internal.variantFor(fams, "swe-2-medium", "")).toBe("swe-2-medium")
+  expect(_internal.variantFor(fams, "kimi-k3", "")).toBe("kimi-k3-high")
+})
+
+test("a model list Devin won't give is said in usage and logged once, not swallowed", async () => {
+  serve(status(), () => new Response("no", { status: 503 }))
+  const logged = []
+  const was = console.error
+  console.error = (...a) => logged.push(a.join(" "))
+  try {
+    const plugin = await DevinAuthPlugin()
+    const u = await plugin.auth.usage(async () => ({ type: "api", key: "key-free-said" }))
+    expect(u.windows.slice(0, 2).map((w) => w.notModels)).toEqual([undefined, undefined])
+    const note = u.windows.find((w) => w.name === "Free models")
+    expect(note?.aside).toBe(true)
+    expect(note.display).toContain("503")
+    await plugin.auth.usage(async () => ({ type: "api", key: "key-free-said" }))
+  } finally {
+    console.error = was
+  }
+  expect(logged.filter((l) => l.includes("GetCliModelConfigs")).length).toBe(1)
+})
+
+test("a plan with no quota window shows none and no free-models row", async () => {
+  const s = status({ dailyQuotaResetAtUnix: undefined, weeklyQuotaResetAtUnix: undefined })
+  s.userStatus.planStatus.planInfo = { planName: "Free", billingStrategy: "BILLING_STRATEGY_CREDITS" }
+  serve(s, () => new Response("no", { status: 503 }))
+  const u = await (await DevinAuthPlugin()).auth.usage(async () => ({ type: "api", key: "key-free-none" }))
+  expect(u.error).toBeUndefined()
+  expect(u.windows).toEqual([])
+})

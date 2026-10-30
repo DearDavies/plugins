@@ -32,6 +32,8 @@ const status = (plan = {}) => ({
 async function run(a, reply) {
   const seen = []
   globalThis.fetch = async (url, init) => {
+    // the account's models: one, not free, so the windows count every model
+    if (String(url).endsWith("/GetCliModelConfigs")) return new Response(new _internal.PB().bytes(1, new _internal.PB().bytes(22, "kimi-k3-high")).done())
     seen.push({ url: String(url), headers: init.headers, body: JSON.parse(init.body) })
     return reply()
   }

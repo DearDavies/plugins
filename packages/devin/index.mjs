@@ -99,6 +99,7 @@ const SNAPSHOT = [
 ]
 
 const familiesOf = (rows) => rows.map(([uid, label, aliases, vs]) => ({ uid, label, aliases, models: vs.map(([id, name, context, output]) => ({ id, name, context, output })) }))
+const SNAPSHOT_FAMILIES = familiesOf(SNAPSHOT)
 
 // parseFamilies reads `devin models list --format json`.
 function parseFamilies(text) {
@@ -174,11 +175,28 @@ const efforts = (f, tier) => {
 
 const tiers = (f) => TIERS.map(([w]) => w).filter((t) => Object.keys(byLevel(f, t)).length > 0)
 
+// suffixed is whether an id is another variant's with a word after its
+// effort that is no tier: SWE-2's swe-2-medium-lightning, which Devin
+// lists at the High cost tier beside the free swe-2-medium (2026-10-15).
+function suffixed(id) {
+  const i = id.lastIndexOf("-")
+  if (i < 0) return false
+  const word = id.slice(i + 1).toLowerCase()
+  return !TIERS.some(([w]) => w === word) && levelOf(id.slice(0, i)) !== ""
+}
+
+// defaultModel is the variant a family's id asks for when no effort is
+// asked: its first that isn't suffixed, as the first Devin lists may be a
+// paid -lightning one; the first when all are.
+function defaultModel(f) {
+  return f.models.find((m) => !suffixed(m.id)) ?? f.models[0]
+}
+
 // defaultLevel is the effort of the variant the family's id asks for when
-// none is asked (its first), medium when that names none.
+// none is asked (defaultModel), medium when that names none.
 function defaultLevel(f) {
   if (f.models.length) {
-    const [t, l] = tierOf(f.models[0].id)
+    const [t, l] = tierOf(defaultModel(f).id)
     if (!t && l) return l
   }
   return "medium"
@@ -202,7 +220,10 @@ function nearest(want, levels) {
 // newest model, which the API takes only as one of its variants — the one
 // at the effort asked for, or the nearest the family has; with none asked,
 // the family's default. A family's fast run is its fast variant at that
-// effort. Any other id (a variant's own) goes as it is.
+// effort. A family the account's list doesn't name (picked from SNAPSHOT's
+// list, which OpenCode's config offers) is SNAPSHOT's family, so swe-2
+// goes as swe-2-high, never as the bare family id Devin takes as no
+// model. Any other id (a variant's own) goes as it is.
 function variantFor(families, model, effort) {
   for (const f of families) {
     if (!named(f, model) || !f.models.length) continue
@@ -210,7 +231,7 @@ function variantFor(families, model, effort) {
       const id = byLevel(f, "")[nearest(effort, efforts(f, ""))]
       if (id) return id
     }
-    return f.models[0].id
+    return defaultModel(f).id
   }
   for (const f of families)
     for (const tier of tiers(f)) {
@@ -219,6 +240,8 @@ function variantFor(families, model, effort) {
       const levels = efforts(f, tier)
       return by[nearest(effort || defaultLevel(f), levels)] || by[levels[0]]
     }
+  if (families !== SNAPSHOT_FAMILIES && !families.some((f) => f.models.some((m) => m.id === model)))
+    return variantFor(SNAPSHOT_FAMILIES, model, effort)
   return model
 }
 
@@ -250,7 +273,7 @@ function listed(families, keep = [], images = {}, free = new Set(), prices = new
   }
   const own = (f, t) => {
     const ids = Object.values(byLevel(f, t))
-    if (!t && f.models.length && !ids.includes(f.models[0].id)) ids.push(f.models[0].id)
+    if (!t && f.models.length && !ids.includes(defaultModel(f).id)) ids.push(defaultModel(f).id)
     return ids
   }
   const out = []
@@ -445,10 +468,13 @@ const said = new Map()
 
 // configsFor is what Devin last said of key's account's models
 // ({images, families}, each null until it has said); with wait false, a
-// first ask isn't waited for.
+// first ask isn't waited for. A failed ask keeps what was said before and
+// is asked again after RETRY; its reason is kept (error) and logged once
+// when the asks start failing, so a list or free models that never come
+// say why (usage shows it too).
 async function configsFor(key, server, wait = true) {
   let c = said.get(key)
-  if (!c) said.set(key, (c = { images: null, families: null, free: new Set(), prices: new Map(), at: 0, failed: 0, asking: null }))
+  if (!c) said.set(key, (c = { images: null, families: null, free: new Set(), prices: new Map(), at: 0, failed: 0, error: "", asking: null }))
   const ask = () =>
     (c.asking ??= (async () => {
       try {
@@ -463,9 +489,11 @@ async function configsFor(key, server, wait = true) {
         const images = parseModelConfigs(b)
         if (!images) throw new Error("GetCliModelConfigs: no models")
         const families = parseConfigFamilies(b)
-        Object.assign(c, { images, families: families.length ? families : null, free: parseFree(b), prices: parsePrices(b), at: Date.now(), failed: 0 })
-      } catch {
-        c.failed = Date.now()
+        Object.assign(c, { images, families: families.length ? families : null, free: parseFree(b), prices: parsePrices(b), at: Date.now(), failed: 0, error: "" })
+      } catch (e) {
+        const why = e?.message || String(e)
+        if (!c.error) console.error(`devin: GetCliModelConfigs failed (${why}); ${c.images ? "the last list is kept" : "the free models and the account's own list are unknown"}, asked again every ${RETRY / 1000}s`)
+        Object.assign(c, { failed: Date.now(), error: why })
       } finally {
         c.asking = null
       }
@@ -2332,9 +2360,16 @@ async function usage(key, server, onStatus) {
     if (hide || ((left === undefined || left === null) && !(quota && at > 0))) continue
     out.windows.push({ name, used: Math.min(100, Math.max(0, 100 - num(left))), span, ...(at > 0 ? { resetsAt: at } : {}) })
   }
+  // with Devin's word on its models unread, which are free is unknown, so
+  // the day and the week count them all (a used-up quota then holds SWE-2
+  // too): a row says so and why, instead of nothing
   if (out.windows.length) {
     const free = await freeIDs(key, server)
     if (free.length) for (const w of out.windows) w.notModels = free
+    else {
+      const c = await configsFor(key, server)
+      if (c.error && !c.at) out.windows.push({ name: "Free models", display: "unknown: Devin's model list couldn't be read (" + c.error + ")", aside: true })
+    }
   }
   const limit = num(st.acuLimit)
   if (limit > 0) {
