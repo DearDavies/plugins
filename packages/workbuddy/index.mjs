@@ -1599,6 +1599,106 @@ function renamed(res, names) {
   return new Response(body, { status: res.status, statusText: res.statusText, headers })
 }
 
+// FILTER_SAYS is the text WorkBuddy's safety filter puts in a reply it ends
+// with finish_reason "content_filter": deepseek-v4.1-flash on
+// copilot.tencent.com reasoned, said this, and ended content_filter with
+// no output tokens counted (itspig, plugins #540).
+const FILTER_SAYS = ["Sorry, I can't respond to this question."]
+
+// filterSaid tells whether text said so far may still be FILTER_SAYS.
+const filterSaid = (text) => {
+  const t = text.replace(/’/g, "'").trimStart()
+  return t !== "" && FILTER_SAYS.some((s) => s.startsWith(t))
+}
+
+// unsaid is a streamed chat whose reply WorkBuddy's filter refused with its
+// text (FILTER_SAYS) and finish_reason content_filter, with the text taken
+// out: a reply that says nothing before content_filter is the refusal magpie
+// asks the group's next member for, where a 200 that said something is an
+// answer the agent fails on ("The model refused to complete the request",
+// plugins #540). Only text that is still the filter's is held, so any other
+// reply's first words go as they come, and one that only begins like it is
+// let through at its first word that isn't, or at its end.
+function unsaid(res) {
+  if (!res.body || !/event-stream/i.test(res.headers.get("content-type") ?? "")) return res
+  const headers = new Headers(res.headers)
+  headers.delete("content-length")
+  headers.delete("content-encoding")
+  const dec = new TextDecoder()
+  const enc = new TextEncoder()
+  let rest = ""
+  let open = true // the reply may still be the filter's
+  let said = ""
+  let held = [] // events held while it may be
+  const chunkOf = (ev) => {
+    const m = /^data:\s?(.*)$/m.exec(ev)
+    if (!m || m[1] === "[DONE]") return null
+    try {
+      const v = JSON.parse(m[1])
+      return v && typeof v === "object" ? v : null
+    } catch {
+      return null
+    }
+  }
+  // without is ev with the filter's text taken out, or "" when nothing
+  // else is in it
+  const without = (ev) => {
+    const v = chunkOf(ev)
+    const c = v?.choices?.[0]
+    if (!c?.delta || typeof c.delta.content !== "string") return ev
+    delete c.delta.content
+    const left = Object.keys(c.delta).filter((k) => k !== "role")
+    if (!left.length && c.finish_reason == null && v.usage == null) return ""
+    return `data: ${JSON.stringify(v)}`
+  }
+  const event = (ev) => {
+    if (!open) return [ev]
+    const c = chunkOf(ev)?.choices?.[0]
+    const text = typeof c?.delta?.content === "string" ? c.delta.content : ""
+    const finish = c?.finish_reason
+    if (c?.delta?.tool_calls || (text && !filterSaid(said + text))) {
+      open = false
+      const out = [...held, ev]
+      held = []
+      return out
+    }
+    said += text
+    if (finish === "content_filter" && said) {
+      open = false
+      const out = [...held, ev].map(without).filter(Boolean)
+      held = []
+      return out
+    }
+    if (finish) {
+      open = false
+      const out = [...held, ev]
+      held = []
+      return out
+    }
+    if (!said) return [ev] // reasoning, the role, before any text
+    held.push(ev)
+    return []
+  }
+  const body = res.body.pipeThrough(
+    new TransformStream({
+      transform(chunk, ctl) {
+        rest = (rest + dec.decode(chunk, { stream: true })).replace(/\r\n/g, "\n")
+        const evs = rest.split("\n\n")
+        rest = evs.pop()
+        const out = evs.flatMap(event)
+        if (out.length) ctl.enqueue(enc.encode(out.map((e) => e + "\n\n").join("")))
+      },
+      flush(ctl) {
+        rest += dec.decode()
+        const out = held.map((e) => e + "\n\n").join("") + rest
+        held = []
+        if (out) ctl.enqueue(enc.encode(out))
+      },
+    }),
+  )
+  return new Response(body, { status: res.status, statusText: res.statusText, headers })
+}
+
 // ---- signing in -------------------------------------------------------------
 
 // poll asks path until WorkBuddy answers with data, retrying the codes
@@ -3439,7 +3539,7 @@ function makePlugin(site) {
             }
             if (ours.has(res)) return res
             // renewed here: a mark the account had comes off
-            return res.status >= 400 ? explained(res) : kept(native ? res : await renamed(res, names), renewed ? "renewed" : "kept")
+            return res.status >= 400 ? explained(res) : kept(native ? res : unsaid(await renamed(res, names)), renewed ? "renewed" : "kept")
           },
         }
       },
@@ -3652,4 +3752,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { idFor, replyAfterToolsOn, withDefaultEffort, defaultEffortOf, gzipped, FREE_ONLY, PRICE_TTL, keyAccount, remoteConfig, cycleOf, typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, accountName, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, asReasoning, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, REFUSED_DOC, commaPaused, commaPausedOn, opened, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, scopeOf, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, prepared, answeredBefore, nativeOf, modelOf, configModels, freeWindowOf, tokensShort, freeWindowRows, freeWindowLedger, readLedgerTail, pinned, rowTime, rowAccount, ofAccount, windowOffset, windowReset, FREE_WINDOW_MODELS, FREE_WINDOW_SPAN, FREE_WINDOW_GAP, FREE_WINDOW_LEAD, checkinOf, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }
+export const _internal = { idFor, replyAfterToolsOn, withDefaultEffort, defaultEffortOf, gzipped, FREE_ONLY, PRICE_TTL, keyAccount, remoteConfig, cycleOf, typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, accountName, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, asReasoning, normalizeToolChoice, fitTools, fitted, renamed, unsaid, FILTER_SAYS, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, REFUSED_DOC, commaPaused, commaPausedOn, opened, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, scopeOf, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, prepared, answeredBefore, nativeOf, modelOf, configModels, freeWindowOf, tokensShort, freeWindowRows, freeWindowLedger, readLedgerTail, pinned, rowTime, rowAccount, ofAccount, windowOffset, windowReset, FREE_WINDOW_MODELS, FREE_WINDOW_SPAN, FREE_WINDOW_GAP, FREE_WINDOW_LEAD, checkinOf, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }

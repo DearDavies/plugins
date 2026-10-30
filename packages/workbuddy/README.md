@@ -239,6 +239,17 @@ serves; a model that refused it once gets it that way from then on, until
 the plugin restarts. A chat ending with the assistant's message (a prefill)
 is refused as before.
 
+WorkBuddy's safety filter can refuse a reply it has begun:
+`deepseek-v4.1-flash` reasoned, said "Sorry, I can't respond to this
+question.", and ended with `finish_reason: "content_filter"` and no output
+tokens, all under a 200 (#540). Since 0.2.4 that line is taken out of a
+streamed chat ending `content_filter`, so the reply says nothing before the
+filter's stop: magpie hands such a refusal to the group's next member
+instead of passing it to the agent as an answer. Only text that is still
+the filter's line is held, so any other reply's words go as they come; the
+same words ending `stop`, or the filter cutting off a reply after other
+words, go through as they came.
+
 ## Models
 
 When you are signed in, the models are the ones WorkBuddy's product config
