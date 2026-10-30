@@ -78,6 +78,20 @@ describe("chat", () => {
     expect(fake.state.chatCalls[0].body.model).toBe("spark-x")
   })
 
+  test("a genuinely over-length Kimi-k2.6 request still comes back 400", async () => {
+    // 150 万 ASCII 字符 ≈ 37.5 万 token，对 262,144 窗口的 Kimi-k2.6 是真超长。
+    // 旧实现按固定 200 万字符阈值判成「上游瞬时故障」并改成 502，magpie 会换号重试到整轮失败。
+    fake.state.chatRefusal = "内容太长了，请精简输入或开启新对话"
+    const loader = await plugin.auth.loader(getAuth)
+    const huge = "word ".repeat(300_000)
+    const res = await loader.fetch(`${fake.gatewayUrl}/api/v1/chat/completions`, {
+      method: "POST",
+      body: JSON.stringify({ model: "kimi-k2.6", stream: false, messages: [{ role: "user", content: huge }] }),
+    })
+    expect(res.status).toBe(400)
+    expect(await res.text()).toContain("上下文超出长度限制")
+  })
+
   test("reasoning effort folds to low/medium/high", async () => {
     const loader = await plugin.auth.loader(getAuth)
     await loader.fetch(`${fake.gatewayUrl}/api/v1/chat/completions`, {
@@ -293,5 +307,45 @@ describe("helpers", () => {
     expect(_internal.splitRateSuffix("Spark X2.5 （x0.1）")).toEqual({ name: "Spark X2.5", rate: "x0.1" })
     expect(_internal.splitRateSuffix("限时免费")).toEqual({ name: "限时免费", rate: undefined })
     expect(_internal.splitRateSuffix("Model (free)")).toEqual({ name: "Model (free)", rate: undefined })
+  })
+})
+
+// ── 「内容太长了」的分流 ────────────────────────────────────────────────
+//
+// 上游这条 400 不含「上下文」：v0.1.2189 之前的 magpie 的 tooLongRe 认不出，
+// 这笔 try 就被当成错误、账号被休息、组里其它成员一次没被问，整轮失败。
+// 这里只改写文案（状态码不变），让旧宿主也能认成 overflow；
+// v0.1.2189 起宿主自己认得，这是给旧宿主的兜底。
+
+describe("a 400 that says the content is too long", () => {
+  // magpie `internal/gateway/gateway.go` 的 tooLongRe 中文两条 —— 逐字抄，改这里等于改契约
+  const tooLongRe = /上下文(长度)?(超|过长)|超(过|出)(了)?(模型)?(的)?(最大)?上下文/
+  const vendor = "内容太长了，请精简输入或开启新对话"
+
+  test("改写成 tooLongRe 认得的说法，状态码保持 400", async () => {
+    const out = _internal.retryableRefusal(400, JSON.stringify({ error: { message: vendor } }))
+    expect(out).not.toBeNull()
+    expect(out.status).toBe(400)
+    const body = await out.text()
+    expect(body).toMatch(tooLongRe)
+    expect(body).not.toContain("内容太长")
+  })
+
+  test("413 与 422 同办，状态码不变", async () => {
+    for (const status of [413, 422]) {
+      const out = _internal.retryableRefusal(status, vendor)
+      expect(out.status).toBe(status)
+      expect(await out.text()).toMatch(tooLongRe)
+    }
+  })
+
+  test("别的 400 不碰", () => {
+    expect(_internal.retryableRefusal(400, JSON.stringify({ error: { message: "invalid api key" } }))).toBeNull()
+  })
+
+  test("不是 400/413/422 的不碰（2xx 是 SSE 干流）", () => {
+    expect(_internal.retryableRefusal(200, vendor)).toBeNull()
+    expect(_internal.retryableRefusal(429, vendor)).toBeNull()
+    expect(_internal.retryableRefusal(500, vendor)).toBeNull()
   })
 })
