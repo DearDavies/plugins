@@ -121,3 +121,41 @@ test("an answer's words are not held", async () => {
     globalThis.fetch = realFetch
   }
 })
+
+// The last chunks copilot.tencent.com sent itspig, byte for byte (plugins
+// #540, 2026-10-30): the filter's line comes with a newline on each side, in
+// the chunk that ends content_filter.
+const LITERAL =
+  'data: {"choices":[{"delta":{"content":"","extra_fields":null,"function_call":null,"reasoning_content":" node","refusal":""},"finish_reason":null,"index":0,"logprobs":null}],"created":1793401068,"id":"c56c77084382622efa17c799396db5cf","model":"deepseek-v4.1-flash","object":"chat.completion.chunk","usage":null}\n\n' +
+  'data: {"choices":[{"delta":{"content":"\\nSorry, I can\'t respond to this question.\\n","extra_fields":null,"function_call":null,"refusal":"","role":"assistant"},"finish_reason":"content_filter","index":0,"logprobs":null}],"created":0,"id":"c56c77084382622efa17c799396db5cf","model":"deepseek-v4.1-flash","object":"chat.completion.chunk","usage":null}\n\n' +
+  "data: [DONE]\n\n"
+
+for (const cuts of [1, 7, 1 << 20]) {
+  test(`WorkBuddy's own refusal chunks, newlines and all, say nothing (cut every ${cuts} bytes)`, async () => {
+    const out = await through(LITERAL, cuts)
+    expect(out).not.toContain("Sorry")
+    const cs = contents(out)
+    expect(cs.map((c) => c.delta.reasoning_content ?? "").join("")).toBe(" node")
+    expect(cs.some((c) => typeof c.delta.content === "string" && c.delta.content)).toBe(false)
+    expect(cs.at(-1).finish_reason).toBe("content_filter")
+    expect(out.endsWith("data: [DONE]\n\n")).toBe(true)
+  })
+}
+
+test("the filter's line with its newlines in chunks of their own is taken out", async () => {
+  const upstream = chunk({ reasoning_content: "hm" }) + chunk({ content: "\n" }) + chunk({ content: said }) + chunk({ content: "\n" }) + chunk({}, "content_filter", zero) + "data: [DONE]\n\n"
+  const out = await through(upstream)
+  expect(out).not.toContain("Sorry")
+  expect(contents(out).some((c) => typeof c.delta.content === "string" && c.delta.content)).toBe(false)
+  expect(contents(out).at(-1).finish_reason).toBe("content_filter")
+})
+
+test("the filter's line followed by more words goes through whole", async () => {
+  const upstream = chunk({ content: `\n${said}\n` }) + chunk({ content: "But here is the answer." }) + chunk({}, "content_filter") + "data: [DONE]\n\n"
+  expect(await through(upstream)).toBe(upstream)
+})
+
+test("a reply that opens with a newline and then answers goes through whole", async () => {
+  const upstream = chunk({ content: "\n" }) + chunk({ content: "Hello" }) + chunk({}, "stop") + "data: [DONE]\n\n"
+  expect(await through(upstream)).toBe(upstream)
+})

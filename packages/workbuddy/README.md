@@ -249,6 +249,9 @@ instead of passing it to the agent as an answer. Only text that is still
 the filter's line is held, so any other reply's words go as they come; the
 same words ending `stop`, or the filter cutting off a reply after other
 words, go through as they came.
+copilot.tencent.com sends the line with a newline on each side
+(`"\nSorry, I can't respond to this question.\n"`); since 0.2.5 white
+space around it no longer lets it through.
 
 ## Models
 

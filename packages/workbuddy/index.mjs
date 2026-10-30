@@ -1605,10 +1605,14 @@ function renamed(res, names) {
 // no output tokens counted (itspig, plugins #540).
 const FILTER_SAYS = ["Sorry, I can't respond to this question."]
 
-// filterSaid tells whether text said so far may still be FILTER_SAYS.
+// filterSaid tells whether text said so far may still be FILTER_SAYS, with
+// white space on either side: copilot.tencent.com sends it as
+// "\nSorry, I can't respond to this question.\n" (itspig, plugins #540).
+// Text that is only white space so far may still be it; text that goes on
+// past it is not.
 const filterSaid = (text) => {
-  const t = text.replace(/’/g, "'").trimStart()
-  return t !== "" && FILTER_SAYS.some((s) => s.startsWith(t))
+  const t = text.replace(/’/g, "'").trim()
+  return FILTER_SAYS.some((s) => s.startsWith(t))
 }
 
 // unsaid is a streamed chat whose reply WorkBuddy's filter refused with its
