@@ -3,7 +3,7 @@
 // zcode_start_test.go TestZCodeStartPlanOwnAccount, zcode_team_test.go).
 import { test, expect, afterAll, beforeAll, beforeEach } from "bun:test"
 import { homedir, tmpdir } from "node:os"
-import { realpathSync } from "node:fs"
+import { readFileSync, realpathSync } from "node:fs"
 
 let ZCodeAuthPlugin, _internal
 beforeAll(async () => {
@@ -486,4 +486,20 @@ test("a coding account's line goes after its coding and gift windows", async () 
   expect(u.windows.map((w) => w.name)).toEqual(["5 hours", "GLM-5.1-Trial · Start Plan", "Gift plans to claim in the ZCode app"])
   expect(u.windows.at(-1)).toEqual(TRUST_BUILD)
   expect(calls.filter((c) => c.url.pathname.endsWith("/preview"))).toHaveLength(1)
+})
+
+// #503: the same card line from the real marketing/touch reply
+// (testdata/touch-1030-wk.json; see checkin.test.mjs for how it was cut)
+test("the real banner feed names its plan once on the card", async () => {
+  const now = Math.trunc(Date.now() / 1000)
+  const token = jwt(now + 86400)
+  const real = readFileSync(new URL("./testdata/touch-1030-wk.json", import.meta.url), "utf8")
+  const calls = serve(({ url }) => {
+    if (url.pathname === "/api/v1/zcode-plan/billing/balance") return ok(startBalance(now, "active"))
+    if (url.pathname === "/api/v1/zcode-plan/billing/preview") return ok(PREVIEW_CLAIMED)
+    if (url.pathname === "/api/v1/marketing/touch") return new Response(real)
+  })
+  const u = await usage(oauth({ site: "zai", jwt: token, device: "11111111-2222-4333-8444-555555555555" }))
+  expect(u.windows.at(-1)).toEqual({ name: "Gift plans to claim in the ZCode app", used: 0, aside: true, display: "1 · ZCODE WEEKEND BUILD" })
+  expect(calls.some((c) => c.url.pathname.endsWith("/claim"))).toBe(false)
 })

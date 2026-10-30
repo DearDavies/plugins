@@ -5,7 +5,7 @@
 // fixture carries only the code.
 import { test, expect, afterAll, beforeAll, beforeEach } from "bun:test"
 import { homedir, tmpdir } from "node:os"
-import { realpathSync } from "node:fs"
+import { readFileSync, realpathSync } from "node:fs"
 
 let ZCodeAuthPlugin, _internal
 beforeAll(async () => {
@@ -271,4 +271,56 @@ test("a feed that doesn't read is failed (unknown), never nothing to claim", asy
   expect(r.outcome).toBe("failed")
   expect(r.message).toStartWith("claimed ZCode Trust Build; gift plans to claim: ")
   expect(claims(calls)).toHaveLength(1)
+})
+
+// #503, 10-30 22:11 +08:00 (kongbai01203, comment 6526694290): the real
+// marketing/touch reply for the account that claimed ZCODE WEEKEND BUILD,
+// in testdata/touch-1030-wk.json. The bytes are the reporter's own, but
+// their paste was cut short inside success_popup.description.content's
+// HTML (2510 of 2628 characters); only the closing `"}}}}]}}` that string
+// and the objects it was in need is added, and the reporter's "…" mark
+// taken off. What the real reply has that touchOf above doesn't: a close
+// button with "args": null, button text as {format, content}, a bundle
+// background, resource_position and priority, and a success_popup whose
+// own buttons (navigate, copy_text) and hero repeat the zcode_plan.
+const TOUCH_REAL = readFileSync(new URL("./testdata/touch-1030-wk.json", import.meta.url), "utf8")
+
+test("the real banner feed: its one claim button is claimed, by the plan's name", async () => {
+  const calls = claimWith(PREVIEW_NO_DATA, (id) => (id === WEEKEND ? json(CLAIMED_WEEKEND) : json("", 404)), TOUCH_REAL)
+  expect(await checkin()).toEqual({ outcome: "claimed", message: "claimed ZCODE WEEKEND BUILD" })
+  // one claim, of the claim button's plan_id, with the body the app sends;
+  // the close button and the success popup's buttons claim nothing
+  expect(claims(calls).map((c) => c.body)).toEqual(['{"plan_id":"zcode-v3-start-plan-1030-wk"}'])
+  const [c] = claims(calls)
+  expect(c.headers.Authorization).toBe("Bearer " + TOKEN)
+  expect(c.headers["X-Device-Mid"]).toBe(DEVICE)
+  // nothing is sent back to the feed (marketing/touch/action is the
+  // banner's confirm/close, not a claim)
+  expect(calls.filter((x) => x.method !== "GET").map((x) => x.url.pathname)).toEqual([CLAIM])
+})
+
+test("the real delivery without its claim button is nothing to claim", async () => {
+  const feed = JSON.parse(TOUCH_REAL)
+  const banner = feed.data.deliveries[0].banner
+  banner.buttons = banner.buttons.filter((b) => b.action.type !== "claim_zcode_plan")
+  expect(banner.buttons.map((b) => b.action.type)).toEqual(["close"])
+  // the zcode_plan it still describes (background, success popup) is no
+  // offer to claim
+  expect(JSON.stringify(feed)).toContain('"zcode_plan":{"plan_id":"zcode-v3-start-plan-1030-wk"')
+  const calls = claimWith(PREVIEW_NO_DATA, () => json(CLAIMED_WEEKEND), feed)
+  expect(await checkin()).toEqual({ outcome: "inactive", message: "no ZCode gift plan to claim" })
+  expect(claims(calls)).toEqual([])
+})
+
+test("after the claim the feed has no delivery: nothing to claim, not a failure", async () => {
+  // kongbai01203's second finding (10-30): once claimed, the campaign leaves
+  // the account's deliveries while its window is still open (to 11-02
+  // 09:00). The count (0) is theirs; these bytes are the real reply's
+  // top level with its deliveries emptied. magpie keeps the day's claim
+  // (checkin.go, claimedOn) over this later inactive.
+  const after = JSON.parse(TOUCH_REAL)
+  after.data.deliveries = []
+  const calls = claimWith(PREVIEW_NO_DATA, () => json(CLAIMED_WEEKEND), after)
+  expect(await checkin()).toEqual({ outcome: "inactive", message: "no ZCode gift plan to claim" })
+  expect(claims(calls)).toEqual([])
 })
