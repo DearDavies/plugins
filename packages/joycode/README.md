@@ -43,6 +43,8 @@ magpie plugin login joycode
 
 ## 消息转发策略
 
+根据 2026-10-30 的 JoyCode 实测，仅对 Responses 协议做以下兼容：GPT-6 Astra、GPT-6.1 Sol 的显式 `none` / `minimal` 转为 `low`；GPT-6 Sol、GPT-5.6 Sol 仅将 `minimal` 转为 `low`，保留上游接受的 `none`。其他 reasoning 参数、有效或未指定的强度、未知模型和其他协议均不变。启用低档推理可能增加用量。此表基于当前账号目录，不自动覆盖未来新增模型。
+
 默认保留完整多轮对话、工具调用和模型原生请求格式。插件从当前账号的 `joycode_userInfo` 获取真实 `userId`、`tenant`、`orgFullName`，按 JoyCode 请求格式补入正文；三种协议统一设置 `language: UNKNOWN`。身份信息按账号 loader 隔离缓存，不接受客户端指定的用户身份。缺少这些元数据时，已观察到网关返回 `AI_GRAY_ACCESS_DENIED`。
 
 网关可能以 HTTP 200 和 SSE 响应头返回裸 JSON 错误；插件会把这种错误转换为明确的失败响应，避免客户端一直等待。普通 403 权限错误不会再被误标为登录失效。

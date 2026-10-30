@@ -40,6 +40,15 @@ const SDK = {
 }
 const LOGIN_TYPE = 'PIN_JD_CLOUD'
 
+// Verified against JoyCode's live gateway, not the Codex model catalogue.
+// GPT-6 Sol and GPT-5.6 Sol accept none; only minimal needs changing there.
+const LOW_EFFORT_FALLBACKS = new Map([
+  ['GPT-6 Astra', ['none', 'minimal']],
+  ['GPT-6.1 Sol', ['none', 'minimal']],
+  ['GPT-6 Sol', ['minimal']],
+  ['GPT-5.6 Sol', ['minimal']],
+])
+
 // HMAC signing key, extracted from the JoyCode IDE's bundled extension.js.
 //
 // This is a PUBLIC PROTOCOL CONSTANT, not a secret: it is baked into every
@@ -774,6 +783,9 @@ export const JoyCodeAuthPlugin = async (_input, options) => {
                 : new TextDecoder().decode(source)
             const payload = JSON.parse(source)
             const protocol = requestProtocol(request ?? input, payload)
+            if (protocol === 'responses' && LOW_EFFORT_FALLBACKS.get(payload.model)?.includes(payload.reasoning?.effort)) {
+              payload.reasoning = { ...payload.reasoning, effort: 'low' }
+            }
             const forwarded = protocol === 'responses' ? withoutUnstoredReasoningIds(payload) : payload
             const body = JSON.stringify({
               ...(flatten && protocol === 'chat' ? flattenBody(payload) : forwarded),

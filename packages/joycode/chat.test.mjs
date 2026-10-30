@@ -191,6 +191,142 @@ test('Request input carries its URL, body, method, and headers into routing', as
   assert.equal(await r.text(), 'event: message_stop\n\ndata: {}\n\n')
 })
 
+test('Responses maps GPT-6 Astra reasoning none to low while preserving the payload', async t => {
+  let sent
+  const payload = {
+    model: 'GPT-6 Astra',
+    input: 'OK',
+    reasoning: {
+      effort: 'none',
+      summary: 'auto',
+    },
+    metadata: { requestId: 'keep-this-field' },
+    stream: true,
+  }
+  const r = await request(t, new Response('data: [DONE]\n\n', {
+    headers: { 'content-type': 'text/event-stream' },
+  }), {
+    input: 'https://api-ai.jd.com/v1/responses',
+    payload,
+    upstream(_url, init) { sent = JSON.parse(init.body) },
+  })
+  assert.equal(r.status, 200)
+  await r.text()
+  const { userId, tenant, orgFullName, language, ...forwarded } = sent
+  assert.deepEqual(forwarded, {
+    ...payload,
+    reasoning: { ...payload.reasoning, effort: 'low' },
+  })
+})
+
+for (const [label, model, effort, expectedEffort] of [
+  ['GPT-6 Astra none', 'GPT-6 Astra', 'none', 'low'],
+  ['GPT-6 Astra minimal', 'GPT-6 Astra', 'minimal', 'low'],
+  ['GPT-6.1 Sol none', 'GPT-6.1 Sol', 'none', 'low'],
+  ['GPT-6.1 Sol minimal', 'GPT-6.1 Sol', 'minimal', 'low'],
+  ['GPT-6 Sol minimal', 'GPT-6 Sol', 'minimal', 'low'],
+  ['GPT-5.6 Sol minimal', 'GPT-5.6 Sol', 'minimal', 'low'],
+  ['GPT-6 Sol none', 'GPT-6 Sol', 'none', 'none'],
+  ['GPT-5.6 Sol none', 'GPT-5.6 Sol', 'none', 'none'],
+  ['unknown model none', 'Unknown Model', 'none', 'none'],
+  ['unknown model minimal', 'Unknown Model', 'minimal', 'minimal'],
+]) {
+  test(`Responses maps ${label} reasoning effort`, async t => {
+    let sent
+    const payload = {
+      model,
+      input: 'OK',
+      reasoning: { effort, summary: 'auto' },
+      metadata: { case: label },
+      stream: true,
+    }
+    const r = await request(t, new Response('data: [DONE]\n\n', {
+      headers: { 'content-type': 'text/event-stream' },
+    }), {
+      input: 'https://api-ai.jd.com/v1/responses',
+      payload,
+      upstream(_url, init) { sent = JSON.parse(init.body) },
+    })
+    assert.equal(r.status, 200)
+    await r.text()
+    const { userId, tenant, orgFullName, language, ...forwarded } = sent
+    assert.deepEqual(forwarded, {
+      ...payload,
+      reasoning: { ...payload.reasoning, effort: expectedEffort },
+    })
+  })
+}
+
+for (const [label, model, reasoning] of [
+  ['low', 'GPT-6 Astra', { effort: 'low', summary: 'auto' }],
+  ['medium', 'GPT-6 Astra', { effort: 'medium', summary: 'auto' }],
+  ['high', 'GPT-6 Astra', { effort: 'high', summary: 'auto' }],
+  ['xhigh', 'GPT-6 Astra', { effort: 'xhigh', summary: 'auto' }],
+  ['max', 'GPT-6 Astra', { effort: 'max', summary: 'auto' }],
+  ['missing effort', 'GPT-6 Astra', { summary: 'auto' }],
+  ['other model none', 'GPT-5.6 Sol', { effort: 'none', summary: 'auto' }],
+]) {
+  test(`Responses preserves reasoning effort ${label}`, async t => {
+    let sent
+    const payload = {
+      model,
+      input: 'OK',
+      reasoning,
+      metadata: { case: label },
+      stream: true,
+    }
+    const r = await request(t, new Response('data: [DONE]\n\n', {
+      headers: { 'content-type': 'text/event-stream' },
+    }), {
+      input: 'https://api-ai.jd.com/v1/responses',
+      payload,
+      upstream(_url, init) { sent = JSON.parse(init.body) },
+    })
+    assert.equal(r.status, 200)
+    await r.text()
+    const { userId, tenant, orgFullName, language, ...forwarded } = sent
+    assert.deepEqual(forwarded, payload)
+  })
+}
+
+for (const [name, input, payload] of [
+  [
+    'Chat Completions',
+    'https://api-ai.jd.com/v1/chat/completions',
+    {
+      model: 'GPT-6 Astra',
+      messages: [{ role: 'user', content: 'OK' }],
+      reasoning: { effort: 'none', summary: 'auto' },
+      stream: true,
+    },
+  ],
+  [
+    'Anthropic Messages',
+    'https://api-ai.jd.com/v1/messages',
+    {
+      model: 'GPT-6 Astra',
+      max_tokens: 8,
+      messages: [{ role: 'user', content: 'OK' }],
+      reasoning: { effort: 'none', summary: 'auto' },
+    },
+  ],
+]) {
+  test(`${name} preserves GPT-6 Astra reasoning none`, async t => {
+    let sent
+    const r = await request(t, new Response('data: [DONE]\n\n', {
+      headers: { 'content-type': 'text/event-stream' },
+    }), {
+      input,
+      payload,
+      upstream(_url, init) { sent = JSON.parse(init.body) },
+    })
+    assert.equal(r.status, 200)
+    await r.text()
+    const { userId, tenant, orgFullName, language, ...forwarded } = sent
+    assert.deepEqual(forwarded, payload)
+  })
+}
+
 test('Anthropic double-wrapped SSE is normalized across chunk boundaries', async t => {
   const upstreamText = [
     'data: event: message_start\n\n',
