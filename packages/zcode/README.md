@@ -233,8 +233,11 @@ left, shows no count.
 **Gift plans ZCode holds but has not granted.** ZCode hands out one-off
 trust-build / gift plans (a day's ZCode Trust Build, say) that are not
 on the account until the ZCode app claims them. The plugin reads the
-app's own list of them (`GET /api/v1/zcode-plan/billing/preview`) with
-the card and names them there — the window is named "Gift plans to
+app's own lists of them with the card and names them there: its claim
+banners' feed (`GET /api/v1/marketing/touch`, each delivery's
+`claim_zcode_plan` button) and `GET /api/v1/zcode-plan/billing/preview`.
+A banner plan (a weekend's ZCODE WEEKEND BUILD, 10-30) is in the feed
+alone, never in the preview (#503) — the window is named "Gift plans to
 claim in the ZCode app" and the display shows "1 · ZCode Trust Build"
 — set aside, so the line stops nothing and routing, usage caps and the
 menu bar pass it over. The name is a fixed sentence magpie can
@@ -249,13 +252,17 @@ the next read shows it as an ordinary gift bucket.
 With ZCode turned on in magpie's Settings → Daily check-in (it is off
 until you turn it on), magpie has the plugin claim each account's gift
 plans once a day (`auth.checkin`; `magpie accounts checkin` asks now). It
-reads the app's preview list and posts each plan it lists to
+reads both lists above (the banners' feed and the preview, each plan
+once) and posts each plan to
 `POST /api/v1/zcode-plan/billing/claim` (`{"plan_id": …}`) with the
 account's ZCode session, as the app does. The answer is judged by the
 body's code, not the HTTP status:
 
 - nothing listed: *inactive* (ZCode answers an account with nothing to
-  claim `{"code":0,"msg":""}`, with no list at all);
+  claim `{"code":0,"msg":""}`, with no list at all). A list that doesn't
+  read is *failed*, never nothing to claim. A plan just claimed may show
+  in neither `billing/preview` nor `billing/current` until its
+  `effective_at`, so neither list is read as "claimed or not";
 - code 0: *claimed* (the next request uses the plan);
 - code 1003 "target already exists" (HTTP 200): *done*, claimed before;
 - code 3007 "captcha verify failed": *captcha*, the plan is claimed in
