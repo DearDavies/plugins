@@ -2949,11 +2949,19 @@ function variants(efforts) {
 
 // configModels is the site's own list as a provider's models, each on the
 // API it is served on: a Claude model on Messages, the rest on chat.
+// A model declared here (before an account's list is read, for a key
+// whose CLI reads no config, or when /v3/config can't be read) takes images
+// unless textOnly says the site drops them: both sites' configs mark every
+// model supportsImages (read 2026-11-01), and a chat to WorkBuddy AI's
+// kimi-k3 with a two-colour PNG named both colours (plugins#572). Declared
+// text-only, as before, every model read as one that can't see.
 function configModels(site) {
   return Object.fromEntries(site.models.map(([id, name, context, efforts]) => [id, {
     name,
     limit: { context, output: 0 },
     tool_call: true,
+    attachment: !textOnly(site, id),
+    modalities: { input: textOnly(site, id) ? ["text"] : ["text", "image"], output: ["text"] },
     // OpenCode (and magpie's host) read a config model's package and URL
     // from provider: { npm, api }, not api
     ...(nativeOf(site, id) ? { provider: { npm: NPM_MESSAGES, api: apiMessages(site) } } : {}),

@@ -260,7 +260,9 @@ through as it came.
 When you are signed in, the models are the ones WorkBuddy's product config
 gives its CLI agent (`GET /v3/config`), with their context, image input and
 reasoning levels. Until then, or if WorkBuddy doesn't answer, the list below
-is used.
+is used. Since 0.2.9 its models take images, as the config says of every
+model, except WorkBuddy AI's GLM models, whose images WorkBuddy AI drops
+(#572).
 
 `workbuddy`:
 - Auto
