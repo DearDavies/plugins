@@ -28,7 +28,7 @@
 //
 // OpenCode speaks chat completions to it (@ai-sdk/openai-compatible); the
 // fetch here answers them.
-import { NATIVE_LIMITS, nativeSessions, NativeSessionError, nativeFields, nativeMcpArgs, Quiet } from "./native-session.mjs"
+import { NATIVE_LIMITS, nativeSessions, NativeSessionError, nativeFields, nativeMcpArgs, Quiet, setWireTrace } from "./native-session.mjs"
 import { isDeepStrictEqual } from "node:util"
 import http2 from "node:http2"
 import { STATUS_CODES } from "node:http"
@@ -641,6 +641,11 @@ function credits(plan, grants, ids, resets, now = Date.now()) {
 // On-demand and Total are shown only, a budget with room or none at all
 // keeping nothing in routing. Off, on-demand that can still pay keeps it.
 const INCLUDED_ONLY = "included_only"
+
+// WIRE_TRACE is the switch (magpie's plugin options, off by default) that
+// saves a failed Run's frames, scrubbed, as a JSON file in cursor-traces in
+// magpie's folder (plugins#550): see WireTrace for what one holds.
+const WIRE_TRACE = "wire_trace"
 
 // enterpriseUsage is the allowance GetCurrentPeriodUsage leaves out on an
 // Enterprise account. That call answers with only the billing cycle there;
@@ -2772,8 +2777,13 @@ async function runOnce({ tok, base, id, tools, conv, convID, signal, maxMode, pa
   const { session, req } = o
   let closed = false
   let heartbeat
+  // a Run Cursor stops answering ends, as a retained one does (#2672)
+  const quiet = new Quiet(NATIVE_LIMITS, () => close(), { path: "stateless", model: id })
   const send = (msg) => {
-    if (!closed && !req.destroyed && req.writable) req.write(frame(msg))
+    if (!closed && !req.destroyed && req.writable) {
+      quiet.trace?.frame("out", msg)
+      req.write(frame(msg))
+    }
   }
   const close = () => {
     if (closed) return
@@ -2804,8 +2814,7 @@ async function runOnce({ tok, base, id, tools, conv, convID, signal, maxMode, pa
     book.done()
     return { error: failure(o.status, Buffer.concat(chunks).toString("utf8").slice(0, 1 << 20)) }
   }
-  // a Run Cursor stops answering ends, as a retained one does (#2672)
-  const it = decode(new Quiet(NATIVE_LIMITS, close).frames(frames(req)), {
+  const it = decode(quiet.frames(frames(req)), {
     send,
     blobs,
     tools,
@@ -2816,7 +2825,10 @@ async function runOnce({ tok, base, id, tools, conv, convID, signal, maxMode, pa
   })
   const wrapped = (async function* () {
     try {
-      yield* it
+      for await (const v of it) {
+        if (v?.error) quiet.failed(v.error)
+        yield v
+      }
     } finally {
       close()
       book.done()
@@ -3328,6 +3340,16 @@ export async function CursorAuthPlugin(input) {
       return false
     }
   }
+  // the folder a failed Run's trace goes to, read at each Run's start;
+  // "" with Wire trace off, and outside magpie, which has no such option
+  // (OpenCode's directory is the project's, never written to)
+  setWireTrace(() => {
+    try {
+      return input?.magpie?.option?.(ID, WIRE_TRACE) === true && input.directory ? join(input.directory, "cursor-traces") : ""
+    } catch {
+      return ""
+    }
+  })
   return {
     auth: {
       provider: ID,
@@ -3368,6 +3390,12 @@ export async function CursorAuthPlugin(input) {
           label: "Included usage only",
           description:
             "Keeps an account in routing only while its included usage lasts: once an included pool (Cursor Models, Other Models, a newer plan's Weekly) is used up, magpie moves its models to the next account until it resets, even if on-demand or free credit could pay.",
+        },
+        {
+          key: WIRE_TRACE,
+          label: "Wire trace",
+          description:
+            "For a bug report: when a Cursor request fails, saves the shape of what Cursor sent and what was sent back (each frame's kind, field numbers, size and time) to the cursor-traces folder in magpie's folder. No prompt or reply text, tool names or arguments, tokens, headers or account ids are written. The newest 20 are kept.",
         },
       ],
       // magpie's: how much of the plan's included usage is gone (the plan

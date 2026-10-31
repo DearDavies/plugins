@@ -1,4 +1,6 @@
 import { createHash, randomBytes } from "node:crypto"
+import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 
 // Retention is process-local and optional. A lost owner rebuilds Chat history
 // on a fresh Run; it never resubmits a result to an uncertain native exec.
@@ -75,8 +77,10 @@ function kindOf(f) {
 // reply then waited until the agent gave up (305 s, yetone/magpie#2672).
 // Only time spent waiting on Cursor's next frame counts: not this side
 // handling one, not a slow reader of the reply, not a paused Run.
+// meta names the Run for a wire trace (path, model); with the trace off it
+// is unused.
 export class Quiet {
-  constructor(limits, stop) {
+  constructor(limits, stop, meta = {}) {
     this.limits = limits
     this.stop = stop
     this.heard = 0 // ms waited since Cursor's last frame that wasn't a heartbeat
@@ -86,6 +90,14 @@ export class Quiet {
     this.paused = false
     this.waiting = false
     this.why = ""
+    // what the error says of a checkpoint (plugins#550): its number in the
+    // Run, which of its step's it was (step is 0 where the path doesn't
+    // count steps), and the kinds of the frames before it, run-length
+    this.checkpoints = 0
+    this.step = 0
+    this.stepCheckpoints = 0
+    this.trail = []
+    this.trace = WireTrace.open(meta)
   }
   arm() {
     clearTimeout(this.timer)
@@ -102,20 +114,47 @@ export class Quiet {
   fire() {
     const gap = Date.now() - this.since
     const what = this.heard + gap >= this.limits.quiet ? `${this.heartbeats} heartbeats and nothing else for ${Math.round((this.heard + gap) / 1000)} s` : `no message for ${Math.round(gap / 1000)} s`
-    this.why = `Cursor went quiet: ${what}${this.last ? ", its last message " + this.last : ""} (try again)`
+    this.why = `Cursor went quiet: ${what}${this.last ? ", its last message " + this.lastSaid() : ""} (try again)`
+    this.trace?.event("quiet", { heard: this.heard + gap, heartbeats: this.heartbeats })
     this.gone?.()
     this.stop({ status: 502, message: this.why })
+    this.failed({ status: 502, message: this.why })
+  }
+  // lastSaid is the last frame's kind as the error names it; a checkpoint
+  // with its number, its place in the step and what came before it
+  lastSaid() {
+    if (this.last !== "checkpoint") return this.last
+    const row = this.trail.at(-1)?.[1] ?? 1
+    const before = this.trail.slice(0, -1).map(([k, n]) => n > 1 ? `${k} ×${n}` : k).join(", ")
+    const nth = this.stepCheckpoints === 1 ? "the first" : `number ${this.stepCheckpoints}`
+    return `checkpoint #${this.checkpoints} of the Run`
+      + (this.step ? `, ${nth} of step ${this.step}` : "")
+      + (row > 1 ? `, ${row} in a row` : "")
+      + `, after ${before || "nothing else"}`
+  }
+  // nextStep is the Run's next model call (NativeSession counts them)
+  nextStep(n) {
+    this.step = n
+    this.stepCheckpoints = 0
+    this.trace?.event("step", { n })
+  }
+  // failed is how the Run ended, when it failed: a wire trace, if on, is
+  // written then (once)
+  failed(error) {
+    this.trace?.write(error, this)
   }
   // pause stops the clock while the Run waits on the caller's tool results;
   // resume starts it again from nothing, for Cursor's next model call
   pause() {
     this.waited()
     this.paused = true
+    this.trace?.event("pause")
   }
   resume() {
     this.paused = false
     this.heard = 0
     this.heartbeats = 0
+    this.trace?.event("resume")
     this.arm()
   }
   // frames passes on a Run's frames; once Cursor has gone quiet, the read
@@ -141,10 +180,25 @@ export class Quiet {
           this.waited()
         }
         if (this.why) throw Object.assign(new NativeSessionError(502, this.why), { quiet: true })
-        if (r.done) return
+        if (r.done) {
+          this.trace?.event("eof")
+          return
+        }
         const kind = kindOf(r.value)
+        this.trace?.frame("in", r.value, kind)
         if (kind == null) this.heartbeats++
-        else [this.heard, this.heartbeats, this.last] = [0, 0, kind]
+        else {
+          [this.heard, this.heartbeats, this.last] = [0, 0, kind]
+          if (kind === "checkpoint") {
+            this.checkpoints++
+            this.stepCheckpoints++
+          }
+          if (this.trail.at(-1)?.[0] === kind) this.trail.at(-1)[1]++
+          else {
+            this.trail.push([kind, 1])
+            if (this.trail.length > 4) this.trail.shift()
+          }
+        }
         yield r.value
       }
     } finally {
@@ -155,6 +209,118 @@ export class Quiet {
       // the Run before a sealed batch is read) must not wait behind it
       Promise.resolve(it.return?.()).catch(() => {})
     }
+  }
+}
+
+// The wire trace (plugins#550, off by default; the plugin's Wire trace
+// option): a failed Run's frames, in and out, written to a JSON file for a
+// bug report. A frame is kept as its kind, size, top-level field numbers
+// with their wire types and sizes, and those fields' own field numbers and
+// sizes one level down: the shape of the protocol, never its bytes. No
+// text, thinking, tool name or argument, blob or blob id, checkpoint
+// content, token, header, account or conversation id is read into it; the
+// error's message is scrubbed of anything shaped like an email, id or
+// token. traceDir is the folder, or "" while off, asked at each Run's start.
+let traceDir = () => ""
+export function setWireTrace(dir) {
+  traceDir = typeof dir === "function" ? dir : () => dir || ""
+}
+const TRACE_HEAD = 2000 // the Run's first frames, kept
+const TRACE_TAIL = 3000 // and its last, the ones in between counted only
+const TRACE_FILES = 20 // the newest traces kept in the folder
+// shape is a message's fields as [number, wire, size] (a varint's size 0),
+// with children: the fields' own fields, for a field that is a message
+function shape(data, children) {
+  return nativeFields(data).map((f) => {
+    const own = [f.num, f.wire, f.wire === 0 ? 0 : f.data.length]
+    if (!children || f.wire !== 2) return own
+    try {
+      return [...own, nativeFields(f.data).map((c) => [c.num, c.wire, c.wire === 0 ? 0 : c.data.length])]
+    } catch {
+      return own
+    }
+  })
+}
+export function scrub(s) {
+  return String(s ?? "")
+    .replace(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g, "<email>")
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<id>")
+    .replace(/(auth0|user|google-oauth2|github)\|[\w-]+/gi, "<account>")
+    .replace(/[A-Za-z0-9_\-+/=.]{24,}/g, "<redacted>")
+    .slice(0, 2000)
+}
+export class WireTrace {
+  static open(meta) {
+    let dir = ""
+    try { dir = traceDir() } catch {}
+    return dir ? new WireTrace(dir, meta) : null
+  }
+  constructor(dir, meta = {}) {
+    this.dir = dir
+    this.meta = { path: String(meta.path ?? ""), model: String(meta.model ?? "") }
+    this.started = Date.now()
+    this.head = []
+    this.tail = []
+    this.dropped = 0
+  }
+  push(entry) {
+    if (this.written) return
+    if (this.head.length < TRACE_HEAD) return void this.head.push(entry)
+    this.tail.push(entry)
+    if (this.tail.length > TRACE_TAIL) {
+      this.tail.shift()
+      this.dropped++
+    }
+  }
+  // frame is one frame of the Run: "in" from Cursor ({data} or {end, data}),
+  // "out" a message this side sent
+  frame(dir, f, kind) {
+    const t = Date.now() - this.started
+    const data = dir === "in" ? f.data : f
+    const entry = { t, dir, size: data?.length ?? 0 }
+    if (dir === "in") entry.kind = kind ?? "heartbeat"
+    if (dir === "in" && f.end) entry.end = true
+    else try { entry.fields = shape(data, true) } catch { entry.malformed = true }
+    this.push(entry)
+  }
+  event(name, extra = {}) {
+    this.push({ t: Date.now() - this.started, event: name, ...extra })
+  }
+  // write saves the trace once, when the Run failed; a write that fails
+  // leaves the Run's error as it was
+  write(error, quiet) {
+    if (this.written) return
+    this.written = true
+    try {
+      const at = new Date(this.started).toISOString().replace(/[:.]/g, "-")
+      const body = {
+        trace: 1,
+        plugin: "@magpie-community/opencode-cursor-auth",
+        version: version(),
+        ...this.meta,
+        started: new Date(this.started).toISOString(),
+        ms: Date.now() - this.started,
+        error: { status: error?.status ?? 0, message: scrub(error?.message) },
+        quiet: quiet ? { last: quiet.last, checkpoints: quiet.checkpoints, step: quiet.step, stepCheckpoints: quiet.stepCheckpoints, heartbeats: quiet.heartbeats, heard: quiet.heard, trail: quiet.trail } : undefined,
+        frames: [...this.head, ...(this.dropped ? [{ dropped: this.dropped }] : []), ...this.tail],
+      }
+      mkdirSync(this.dir, { recursive: true })
+      const file = join(this.dir, `${at}-${randomBytes(3).toString("hex")}.json`)
+      writeFileSync(file + ".tmp", JSON.stringify(body) + "\n", { mode: 0o600 })
+      renameSync(file + ".tmp", file)
+      this.file = file
+      const old = readdirSync(this.dir).filter((n) => n.endsWith(".json")).sort()
+      for (const n of old.slice(0, Math.max(0, old.length - TRACE_FILES))) rmSync(join(this.dir, n), { force: true })
+    } catch {}
+    this.head = this.tail = []
+  }
+}
+// version is the package's, for a trace to say
+function version() {
+  try {
+    return JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version ?? ""
+  } catch {
+    return ""
   }
 }
 
@@ -587,7 +753,8 @@ class NativeSession {
     this.segment = new Segment(this, prepared.chat)
     this.retain(bytes(prepared.chat))
     this.expireIn(this.limits.lifetime)
-    this.quiet = new Quiet(this.limits, (e) => this.fail(e))
+    this.quiet = new Quiet(this.limits, (e) => this.fail(e), { path: "native", model: resolution?.id })
+    this.quiet.nextStep(this.steps)
   }
   // expireIn sets the Run's absolute deadline ms from now: from its start,
   // the whole lifetime; a test brings it in after the first answer
@@ -632,6 +799,8 @@ class NativeSession {
     if (this.error || this.state === "complete") return
     this.error = error
     this.state = state
+    // a cancelled Run is the caller's doing, not a failure to trace
+    if (state !== "cancelled") this.quiet.failed(error)
     this.segment.fail(error)
     for (const segment of this.batches ?? []) segment.detach?.()
     this.segment.detach?.()
@@ -671,6 +840,7 @@ class NativeSession {
   }
   send(message) {
     if (this.error || this.transportClosed) invalid("native transport is no longer writable", 410)
+    this.quiet.trace?.frame("out", message)
     this.transport.send(message)
   }
   // reply answers one of Cursor's KV requests once the outbound queue has
@@ -764,6 +934,7 @@ class NativeSession {
   // caller's results, or after a step whose calls were all answered here.
   nextStep(estimate) {
     this.steps++
+    this.quiet.nextStep(this.steps)
     this.stepSaid = this.said
     if (estimate != null) this.stepEstimate = estimate
   }

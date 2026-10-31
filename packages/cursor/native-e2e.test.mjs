@@ -2,9 +2,12 @@ import "./nonet.mjs"
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test"
 import http2 from "node:http2"
 import { randomUUID } from "node:crypto"
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { getEventListeners } from "node:events"
 import { CursorAuthPlugin, _internal } from "./index.mjs"
-import { NATIVE_LIMITS, nativeSessions } from "./native-session.mjs"
+import { NATIVE_LIMITS, nativeSessions, setWireTrace } from "./native-session.mjs"
 import { message, bin, text, uint, readWire, nest, number, string, envelope, update, end, tool, setBlob, getBlob, checkpoint, abortExec, readResult } from "./native-test-wire.mjs"
 
 const savedFetch = globalThis.fetch
@@ -96,6 +99,7 @@ async function agent(options = {}) {
     const first = () => {
       if (options.stallInitial) return
       send(update(4, text(1, options.initialReasoning ?? "native planning one")))
+      for (const b of options.afterThinking ?? []) send(b)
       // Cursor's own heartbeats, InteractionUpdate.heartbeat, and nothing else
       if (options.serverHeartbeat) {
         const beat = () => delay(() => { send(update(13, Buffer.alloc(0))); beat() }, options.serverHeartbeat)
@@ -255,8 +259,8 @@ async function agent(options = {}) {
     throw new Error("unexpected fake API request: " + u)
   }
   a.firstID = firstID
-  a.ask = async (account, chat, { signal, session = "fixture-session" } = {}) => {
-    const plugin = await CursorAuthPlugin()
+  a.ask = async (account, chat, { signal, session = "fixture-session", input } = {}) => {
+    const plugin = await CursorAuthPlugin(input)
     const loader = await plugin.auth.loader(async () => account)
     const res = await loader.fetch(a.base + "/v1/chat/completions", { method: "POST", headers: { "x-magpie-cursor-session": session }, body: JSON.stringify(chat), signal })
     if (chat.stream) return res
@@ -1548,6 +1552,69 @@ for (const path of ["native", "stateless"]) {
     await until(() => a.closedStreams === 1)
   })
 }
+
+// plugins#550: Cursor's heartbeats and nothing else after a checkpoint. The
+// error names the checkpoint, and with Wire trace on, the Run's frames are
+// saved in shape only: no prompt, thinking, checkpoint bytes, token or id.
+for (const path of ["native", "stateless"]) {
+  test(`${path}: a quiet Run's error names its checkpoint, and Wire trace saves its frames scrubbed (plugins#550)`, async () => {
+    Object.assign(NATIVE_LIMITS, { idle: 150, quiet: 400 })
+    if (path === "stateless") NATIVE_LIMITS.perProcess = 0
+    const secret = "SECRET-" + randomUUID()
+    const a = await agent({
+      thinkingOnly: true, serverHeartbeat: 40, initialReasoning: "thinking " + secret,
+      afterThinking: [checkpoint(message(bin(1, Buffer.from("checkpoint " + secret)), uint(10, 1), text(22, "cli")))],
+    })
+    const dir = mkdtempSync(join(tmpdir(), "cursor-trace-"))
+    try {
+      const account = auth()
+      const input = { directory: dir, magpie: { option: (id, key) => id === "cursor" && key === "wire_trace" } }
+      const chat = initial({ stream: true, messages: [{ role: "user", content: "prompt " + secret }] })
+      const sse = await sseOf(await a.ask(account, chat, { input }))
+      expect(sse).toMatch(path === "native"
+        ? /Cursor went quiet: \d+ heartbeats and nothing else for \d+ s, its last message checkpoint #1 of the Run, the first of step 1, after blob request ×2, thinking \(try again\)/
+        : /Cursor went quiet: \d+ heartbeats and nothing else for \d+ s, its last message checkpoint #1 of the Run, after blob request ×2, thinking \(try again\)/)
+      await until(() => a.closedStreams === 1)
+      const files = readdirSync(join(dir, "cursor-traces"))
+      expect(files).toHaveLength(1)
+      const raw = readFileSync(join(dir, "cursor-traces", files[0]), "utf8")
+      for (const word of [secret, account.access, account.accountId, "synthetic-", "Bearer", "fixture-session"]) expect(raw).not.toContain(word)
+      const t = JSON.parse(raw)
+      expect(t).toMatchObject({ trace: 1, path, model: "fixture-model", error: { status: 502 } })
+      expect(t.error.message).toContain("checkpoint #1")
+      const kinds = t.frames.filter((f) => f.dir === "in").map((f) => f.kind)
+      const at = kinds.indexOf("checkpoint")
+      // Cursor asked for the history's two blobs, thought, then checkpointed
+      expect(kinds.slice(0, at)).toEqual(["blob request", "blob request", "thinking"])
+      // after the checkpoint, Cursor's heartbeats and nothing else
+      expect(kinds.slice(at + 1).length).toBeGreaterThan(0)
+      expect(kinds.slice(at + 1).every((k) => k === "heartbeat")).toBe(true)
+      // the checkpoint's shape: AgentServerMessage field 3, its state's fields by number
+      expect(t.frames.find((f) => f.kind === "checkpoint").fields[0].slice(0, 2)).toEqual([3, 2])
+      expect(t.frames.find((f) => f.kind === "checkpoint").fields[0][3].map((c) => c[0])).toEqual([1, 10, 22])
+      expect(t.frames.some((f) => f.dir === "out")).toBe(true)
+      expect(t.frames.some((f) => f.event === "quiet")).toBe(true)
+    } finally {
+      setWireTrace("")
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+}
+
+test("native: Wire trace is off unless the option is on (plugins#550)", async () => {
+  Object.assign(NATIVE_LIMITS, { idle: 150 })
+  const a = await agent({ thinkingOnly: true })
+  const dir = mkdtempSync(join(tmpdir(), "cursor-trace-"))
+  try {
+    const input = { directory: dir, magpie: { option: () => false } }
+    const sse = await sseOf(await a.ask(auth(), initial({ stream: true }), { input }))
+    expect(sse).toContain("Cursor went quiet")
+    await until(() => a.closedStreams === 1)
+    expect(readdirSync(dir)).toEqual([])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 test("stateless: a call with no count, then silence, is an error, not a step of tool calls (#2672)", async () => {
   Object.assign(NATIVE_LIMITS, { idle: 150, perProcess: 0 })

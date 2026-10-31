@@ -298,6 +298,27 @@ could still pay for them. On-demand and Total are still shown but never
 keep an account in routing. Use it when on-demand is a shared or paid pool
 you don't want spent. When off, on-demand works as described above.
 
+### Wire trace (optional, for bug reports)
+
+In magpie, open the Cursor provider, turn on **Wire trace** under **Plugin
+options**, and save (or set `"pluginOptions": {"cursor": {"wire_trace":
+true}}` in magpie's settings.json). It is off by default and takes effect
+at the next request.
+
+When on, each Cursor request that fails (not one you cancel) saves a JSON
+file in the `cursor-traces` folder of magpie's folder: `~/.config/magpie/cursor-traces`
+(on Windows `C:\Users\<you>\.config\magpie\cursor-traces`), or the
+portable data folder. The newest 20 are kept. A file holds the Run's
+frames in order, both ways, as each frame's time (ms from the Run's
+start), size, kind (text, thinking, checkpoint, heartbeat, ...), field
+numbers and sizes, and the field numbers and sizes one level inside them,
+plus the error and the model id. No prompt, reply or thinking text, tool
+name or argument, blob or checkpoint content, token, header, account or
+conversation id is written; the error's message has anything shaped like
+an email, id or token taken out. Look the file over before you attach it.
+
+Turn it off again when you're done.
+
 Sign in to the Cursor account linked in Grok Bot. A linked SuperGrok
 subscription grants Bot access without a paid Cursor plan; see
 [Grok Bot plans and billing](https://cursor.com/help/grok-bot/plans).
