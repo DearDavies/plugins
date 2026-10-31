@@ -55,10 +55,12 @@ test("a page magpie serves, with a host part and no reads", () => {
   }
   for (const m of html.matchAll(/(?:src|href)="([^"]+)"/g)) {
     if (m[1].startsWith("_magpie/")) continue
-    expect(readdirSync(page)).toContain(m[1])
+    expect(readdirSync(page)).toContain(m[1].split("?")[0])
   }
   for (const f of ["index.html", "style.css", "agents.js", "model.js", "icons.js", "scene.js", "app.js", "icon.svg"]) expect(pkg.files).toContain(`page/${f}`)
-  for (const f of ["page/icons", "lib", "office.hooks.mjs"]) expect(pkg.files).toContain(f)
+  for (const f of ["page/icons", "lib", "office.hooks.mjs", "page/scene3d.js", "page/three.min.js", "bin", "SKILL.md"]) expect(pkg.files).toContain(f)
+  expect(html).toMatch(/<script src="three\.min\.js\?v=[a-f0-9]+"><\/script>/)
+  expect(html).toMatch(/<script src="scene3d\.js\?v=[a-f0-9]+"><\/script>/)
   // screenshots are linked from GitHub: an install needs none of them
   expect(pkg.files).not.toContain("docs")
   expect(new Set(pkg.files).size).toBe(pkg.files.length)
@@ -86,11 +88,14 @@ test("the page reaches no clipboard API it cannot have", () => {
 })
 
 test("the page reads nothing of magpie's and reaches no network", () => {
-  for (const f of readdirSync(page).filter((f) => f.endsWith(".js") && f !== "live.js")) {
+  // three.min.js is a vendored renderer with dormant loader strings; the
+  // scene3d.js we wrote must itself never reach out. Both are checked apart.
+  for (const f of readdirSync(page).filter((f) => f.endsWith(".js") && !["live.js", "scene3d.js", "three.min.js"].includes(f))) {
     const src = read(f)
     expect(src).not.toMatch(/magpie\.read\(/)
     expect(src).not.toMatch(/\bfetch\(|XMLHttpRequest|WebSocket|sendBeacon|EventSource|importScripts|new Worker/)
   }
+  expect(read("scene3d.js")).not.toMatch(/\bfetch\(|XMLHttpRequest|WebSocket|sendBeacon|EventSource|importScripts|new Worker/)
 })
 
 test("every agent magpie knows, each with its own icon file", () => {
