@@ -17,6 +17,13 @@ import { isAbsolute, join, relative, resolve } from "node:path"
 
 const ID = "devin"
 const CHAT = "@ai-sdk/openai-compatible"
+// Devin's Claude models are asked on Anthropic's Messages API, so the
+// client's own blocks and cache marks reach the plugin as it sent them
+// (#566); every other model stays on chat completions
+const ANTHROPIC = "@ai-sdk/anthropic"
+const isClaude = (id) => /claude/i.test(String(id))
+const npmOf = (id) => (isClaude(id) ? ANTHROPIC : CHAT)
+const variantOf = (id, e) => (isClaude(id) ? { effort: e } : { reasoningEffort: e })
 
 const SERVER = "https://server.codeium.com"
 const AUTHORIZE = "https://app.devin.ai/auth/cli/continue"
@@ -558,7 +565,8 @@ function configModel(m) {
     temperature: true,
     modalities: { input: image ? ["text", "image"] : ["text"], output: ["text"] },
     limit: { context: m.context, output: m.output },
-    ...(m.efforts.length ? { variants: Object.fromEntries(m.efforts.map((e) => [e, { reasoningEffort: e }])) } : {}),
+    ...(isClaude(m.id) ? { provider: { npm: ANTHROPIC, api: BASE } } : {}),
+    ...(m.efforts.length ? { variants: Object.fromEntries(m.efforts.map((e) => [e, variantOf(m.id, e)])) } : {}),
   }
 }
 
@@ -568,7 +576,7 @@ function runtimeModel(m) {
     id: m.id,
     providerID: ID,
     name: m.name,
-    api: { id: m.id, url: BASE, npm: CHAT },
+    api: { id: m.id, url: BASE, npm: npmOf(m.id) },
     status: "active",
     headers: {},
     options: {},
@@ -584,7 +592,7 @@ function runtimeModel(m) {
       interleaved: false,
     },
     release_date: "",
-    variants: Object.fromEntries(m.efforts.map((e) => [e, { reasoningEffort: e }])),
+    variants: Object.fromEntries(m.efforts.map((e) => [e, variantOf(m.id, e)])),
     // magpie's: a model the account's quota doesn't count
     ...(m.free ? { free: true } : {}),
   }
@@ -1565,11 +1573,16 @@ function build(chat, uid, key) {
     }
     msgs[at].text = joinNonEmpty(instructions, msgs[at].text)
   }
+  return encodeRequest(msgs, tools, { max: chat.max_completion_tokens || chat.max_tokens, temperature: chat.temperature, top_p: chat.top_p }, uid, key)
+}
 
+// encodeRequest is the GetChatMessage request of msgs, with tools offered
+// and the sampling asked, to the model uid.
+function encodeRequest(msgs, tools, chat, uid, key) {
   const out = new PB().bytes(1, metadata(key))
   for (const m of msgs) out.bytes(3, encodeMsg(m))
   out.varint(7, 5)
-  const max = chat.max_completion_tokens || chat.max_tokens || 128000 // the server holds it to the model's own
+  const max = chat.max || 128000 // the server holds it to the model's own
   // Devin answers "an internal error occurred" to a temperature or top_p of
   // exactly 0 (on every model: its Claude ones and swe-2), where 1e-6 goes
   // through; a 0 is sent as the smallest step above it, as near greedy
@@ -1596,6 +1609,9 @@ function encodeMsg(m) {
   if (m.text) b.str(3, m.text)
   for (const c of m.calls ?? []) b.bytes(6, new PB().str(1, c.id ?? "").str(2, c.name ?? "").bytes(3, c.args))
   if (m.callID) b.str(7, m.callID)
+  // prompt_cache_options {type: EPHEMERAL}, as the devin CLI marks its
+  // own: where the client put cache_control (#566)
+  if (m.cache) b.bytes(8, new PB().varint(1, 1))
   for (const p of m.images ?? []) b.bytes(10, new PB().str(1, p.data).str(2, p.type))
   return b.done()
 }
@@ -1706,6 +1722,7 @@ async function* events(it) {
       total_tokens: prompt + usage.output,
       prompt_tokens_details: { cached_tokens: usage.cacheRead, cache_write_tokens: usage.cacheWrite },
     },
+    tokens: usage,
   }
 }
 
@@ -1726,9 +1743,13 @@ async function* prepend(first, rest) {
 
 // roundtrip sends a chat to GetChatMessage and answers with its event
 // iterator, or an error ({status, message}).
-async function roundtrip({ key, server, families }, chat, signal) {
-  const uid = variantFor(families, chat.model, effortOf(chat.reasoning_effort))
-  const body = frame(build(chat, uid, key))
+// A wire is how a request is read: chat completions' or Messages'.
+const CHAT_WIRE = { effort: (chat) => effortOf(chat.reasoning_effort), build }
+const MESSAGES = { effort: anthropicEffort, build: buildMessages }
+
+async function roundtrip({ key, server, families }, chat, signal, wire = CHAT_WIRE) {
+  const uid = variantFor(families, chat.model, wire.effort(chat))
+  const body = frame(wire.build(chat, uid, key))
   let res
   try {
     res = await fetch(server + CHAT_RPC, {
@@ -1815,6 +1836,262 @@ async function complete({ key, server, families }, chat, signal) {
       else if (e.stop) ctl.enqueue(chunk({}, e.stop, { usage: e.usage }))
       else if (e.error) {
         ctl.enqueue(enc.encode(`data: ${JSON.stringify({ error: { message: e.error.message, code: e.error.status } })}\n\n`))
+        ctl.close()
+      }
+    },
+    cancel() {
+      it.return?.()
+    },
+  })
+  return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "X-Magpie-Sign-In": "kept" } })
+}
+
+// ---- Anthropic's Messages, for the Claude models ------------------------------------
+
+// Claude Code's billing line, a system block of its own whose cch changes
+// every turn: Devin would read it as the prompt's first words, and no
+// turn's prefix would be the last's
+const BILLING_LINE = /^x-anthropic-billing-header:(\s*[A-Za-z_]+=[^;\s]*;)*\s*(\n|$)/
+
+// marked says whether the client asked for the cache to end at a block.
+const marked = (b) => !!(b && typeof b === "object" && b.cache_control && typeof b.cache_control === "object")
+
+// anthropicImage is an image block as Devin takes an image, or null for
+// one that carries no bytes (Devin takes no URL).
+function anthropicImage(b) {
+  const s = b?.type === "image" ? b.source : null
+  if (s?.type !== "base64" || !s.data) return null
+  return { data: s.data, type: s.media_type || "image/png" }
+}
+
+// anthropicEffort is the effort a Messages request asks for, as magpie
+// reads it: output_config's, else the thinking budget's; none with the
+// thinking turned off.
+function anthropicEffort(req) {
+  const t = req.thinking?.type
+  if (t === "disabled") return ""
+  if (req.output_config?.effort) return effortOf(req.output_config.effort)
+  if (t !== "enabled" && t !== "adaptive") return ""
+  const n = Number(req.thinking?.budget_tokens) || 0
+  return n <= 0 ? "" : n <= 4096 ? "low" : n <= 12000 ? "medium" : n <= 24000 ? "high" : "xhigh"
+}
+
+// buildMessages is the GetChatMessage request for a Messages request, to
+// the model uid. Each of the client's blocks is a ChatMessagePrompt of its
+// own, in order, and one the client marked with cache_control carries
+// prompt_cache_options: Devin's cache ends only where a prompt says so,
+// and only at a prompt's end, so a block joined to others lost its mark
+// (#566). Every boundary is kept, not only the marked ones: a mark moves
+// forward as the history grows, and the prompts it passed must stay as
+// they were sent for the cache to be read (yetone/magpie#3835).
+function buildMessages(req, uid, key) {
+  // Messages alternate roles; a client that sends two of one role in a row
+  // means one turn
+  const turns = []
+  for (const m of req.messages ?? []) {
+    if (m?.role !== "user" && m?.role !== "assistant") continue
+    const blocks = typeof m.content === "string" ? (m.content ? [{ type: "text", text: m.content }] : []) : Array.isArray(m.content) ? m.content : []
+    const last = turns[turns.length - 1]
+    if (last?.role === m.role) last.blocks.push(...blocks)
+    else turns.push({ role: m.role, blocks: [...blocks] })
+  }
+
+  const msgs = []
+  let pending = [] // calls the last reply made, not yet answered
+  const answer = () => {
+    for (const c of pending) msgs.push({ role: TOOL, callID: c.id, text: NO_RESULT })
+    pending = []
+  }
+  for (const t of turns) {
+    if (t.role === "assistant") {
+      const own = []
+      const calls = []
+      let mark = false // a tool_use the client marked: the prompt with the calls ends there
+      for (const b of t.blocks) {
+        if (b?.type === "text" && typeof b.text === "string") {
+          if (b.text) own.push({ role: ASSISTANT, text: b.text, calls: [], cache: marked(b) })
+          else if (marked(b) && own.length) own[own.length - 1].cache = true
+        } else if (b?.type === "tool_use" && b.name) {
+          calls.push({ id: inID(b.id), name: b.name, args: JSON.stringify(b.input ?? {}) })
+          mark ||= marked(b)
+        }
+        // thinking goes no further: Devin keeps none of a reply's
+      }
+      if (calls.length) {
+        if (!own.length) own.push({ role: ASSISTANT, text: "", calls: [] })
+        own[own.length - 1].calls = calls
+        own[own.length - 1].cache ||= mark
+      }
+      if (!own.length) continue // a turn that only thought
+      answer()
+      msgs.push(...own)
+      pending = [...calls]
+      continue
+    }
+    let held = [] // images ahead of the user's next words in this turn
+    let words = null // the turn's last prompt of the user's own
+    for (const b of t.blocks) {
+      if (b?.type === "tool_result") {
+        // only a call just made is answered, and only once
+        const i = pending.findIndex((c) => c.id === inID(b.tool_use_id))
+        if (i < 0) continue
+        const inner = typeof b.content === "string" ? [{ type: "text", text: b.content }] : Array.isArray(b.content) ? b.content : []
+        const text = inner.filter((x) => x?.type === "text" && x.text).map((x) => x.text).join("\n\n")
+        const images = inner.map(anthropicImage).filter(Boolean)
+        msgs.push({ role: TOOL, callID: pending[i].id, text: text || "(no output)", images, cache: marked(b) || marked(inner[inner.length - 1]) })
+        pending.splice(i, 1)
+        continue
+      }
+      if (b?.type === "text" && typeof b.text === "string") {
+        if (!b.text) {
+          if (marked(b) && words) words.cache = true
+          continue
+        }
+        answer()
+        words = { role: USER, text: b.text, images: held, cache: marked(b) }
+        held = []
+        msgs.push(words)
+        continue
+      }
+      const im = anthropicImage(b)
+      if (!im) continue
+      // an image goes with the words it follows, or the next ones
+      if (words) {
+        words.images.push(im)
+        words.cache ||= marked(b)
+      } else held.push(im)
+    }
+    if (held.length) {
+      answer()
+      msgs.push({ role: USER, text: "", images: held })
+    }
+  }
+  answer()
+  const last = msgs[msgs.length - 1]
+  if (!last || (last.role === ASSISTANT && !last.calls.length)) msgs.push({ role: USER, text: "Please proceed with the task." })
+
+  // the instructions go ahead of the first user prompt, as in build: the
+  // tools' descriptions, then each system block a prompt of its own, as
+  // Anthropic orders them, so a mark on the system covers the tools too
+  const system = []
+  const blocks = typeof req.system === "string" ? [{ type: "text", text: req.system }] : Array.isArray(req.system) ? req.system : []
+  for (const b of blocks) {
+    if (b?.type !== "text" || typeof b.text !== "string") continue
+    const text = b.text.replace(BILLING_LINE, "")
+    if (text.trim()) system.push({ role: USER, text, cache: marked(b) })
+    else if (marked(b) && system.length) system[system.length - 1].cache = true
+  }
+  const f = req.output_config?.format
+  const format = f?.type === "json_schema" ? formatText({ type: "json_schema", schema: f.schema }) : ""
+  if (format) system.push({ role: USER, text: format })
+  let tools = (req.tools ?? [])
+    .filter((t) => (!t?.type || t.type === "custom") && t.name)
+    .map((t) => ({ name: t.name, description: t.description ?? "", schema: objectRoot(t.input_schema) }))
+  if (req.tool_choice?.type === "none") tools = []
+  const described = toolDescriptions(tools)
+  if (described) system.unshift({ role: USER, text: described, cache: false })
+  if (system.length) {
+    const at = msgs.findIndex((m) => m.role === USER)
+    msgs.splice(at < 0 ? 0 : at, 0, ...system)
+  }
+  return encodeRequest(msgs, tools, { max: req.max_tokens, temperature: req.temperature, top_p: req.top_p }, uid, key)
+}
+
+// anthropicError is a failure as Anthropic words one; like errorResponse,
+// it marks nothing of the account.
+function anthropicError({ status, message }) {
+  const type = { 400: "invalid_request_error", 401: "authentication_error", 403: "permission_error", 404: "not_found_error", 413: "request_too_large", 429: "rate_limit_error", 529: "overloaded_error" }[status] ?? "api_error"
+  return new Response(JSON.stringify({ type: "error", error: { type, message } }), {
+    status,
+    headers: { "Content-Type": "application/json", "X-Magpie-Sign-In": "kept" },
+  })
+}
+
+const STOP_REASON = { tool_calls: "tool_use", length: "max_tokens", stop: "end_turn" }
+const anthropicUsage = (t = {}) => ({ input_tokens: t.input ?? 0, output_tokens: t.output ?? 0, cache_read_input_tokens: t.cacheRead ?? 0, cache_creation_input_tokens: t.cacheWrite ?? 0 })
+
+// completeMessages answers a Messages request through GetChatMessage, as
+// Anthropic would: the reply's blocks, its stop reason and the usage with
+// what was read from the cache and written to it.
+async function completeMessages({ key, server, families }, req, signal) {
+  const rt = await roundtrip({ key, server, families }, req, signal, MESSAGES)
+  if (!rt.it) return anthropicError(rt)
+  const it = rt.it
+  const id = "msg_" + randomBytes(12).toString("hex")
+
+  if (!req.stream) {
+    const content = []
+    let stop = "end_turn"
+    let usage = anthropicUsage()
+    const block = (type) => {
+      const b = content[content.length - 1]
+      if (b?.type === type && type !== "tool_use") return b
+      const n = type === "text" ? { type, text: "" } : { type, thinking: "", signature: "" }
+      content.push(n)
+      return n
+    }
+    const args = []
+    for await (const e of it) {
+      if (e.error) return anthropicError(e.error)
+      if (e.text) block("text").text += e.text
+      if (e.reasoning) block("thinking").thinking += e.reasoning
+      if (e.tool) {
+        args[e.tool.index] = ""
+        content.push({ type: "tool_use", id: e.tool.id, name: e.tool.name, input: {}, index: e.tool.index })
+      }
+      if (e.args) args[e.args.index] += e.args.text
+      if (e.stop) [stop, usage] = [STOP_REASON[e.stop] ?? "end_turn", anthropicUsage(e.tokens)]
+    }
+    for (const b of content) {
+      if (b.type !== "tool_use") continue
+      try {
+        b.input = JSON.parse(args[b.index] || "{}")
+      } catch {
+        b.input = {}
+      }
+      delete b.index
+    }
+    return Response.json({ id, type: "message", role: "assistant", model: req.model, content, stop_reason: stop, stop_sequence: null, usage }, { headers: { "X-Magpie-Sign-In": "kept" } })
+  }
+
+  const sse = (event, data) => enc.encode(`event: ${event}\ndata: ${JSON.stringify({ type: event, ...data })}\n\n`)
+  let began = false
+  let index = -1
+  let open = "" // the kind of the block being sent: text, thinking or tool_use
+  const stream = new ReadableStream({
+    async pull(ctl) {
+      if (!began) {
+        began = true
+        ctl.enqueue(sse("message_start", { message: { id, type: "message", role: "assistant", model: req.model, content: [], stop_reason: null, stop_sequence: null, usage: anthropicUsage() } }))
+      }
+      const close = () => {
+        if (open) ctl.enqueue(sse("content_block_stop", { index }))
+        open = ""
+      }
+      const start = (kind, content_block) => {
+        close()
+        index++
+        open = kind
+        ctl.enqueue(sse("content_block_start", { index, content_block }))
+      }
+      const r = await it.next()
+      if (r.done) return ctl.close()
+      const e = r.value
+      if (e.text) {
+        if (open !== "text") start("text", { type: "text", text: "" })
+        ctl.enqueue(sse("content_block_delta", { index, delta: { type: "text_delta", text: e.text } }))
+      } else if (e.reasoning) {
+        if (open !== "thinking") start("thinking", { type: "thinking", thinking: "", signature: "" })
+        ctl.enqueue(sse("content_block_delta", { index, delta: { type: "thinking_delta", thinking: e.reasoning } }))
+      } else if (e.tool) start("tool_use", { type: "tool_use", id: e.tool.id, name: e.tool.name, input: {} })
+      else if (e.args) {
+        if (open === "tool_use") ctl.enqueue(sse("content_block_delta", { index, delta: { type: "input_json_delta", partial_json: e.args.text } }))
+      } else if (e.stop) {
+        close()
+        ctl.enqueue(sse("message_delta", { delta: { stop_reason: STOP_REASON[e.stop] ?? "end_turn", stop_sequence: null }, usage: anthropicUsage(e.tokens) }))
+        ctl.enqueue(sse("message_stop", {}))
+      } else if (e.error) {
+        ctl.enqueue(enc.encode(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "api_error", message: e.error.message } })}\n\n`))
         ctl.close()
       }
     },
@@ -2423,20 +2700,25 @@ export async function DevinAuthPlugin({ client } = {}) {
           baseURL: BASE,
           apiKey: auth.key,
           async fetch(input, init = {}) {
-            const now = await getAuth()
-            if (now?.type !== "api" || !now.key) return errorResponse({ status: 401, message: "Devin isn't signed in" })
             const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
-            if (!/\/chat\/completions$/.test(new URL(url).pathname)) return errorResponse({ status: 404, message: "only chat completions are served" })
+            const path = new URL(url).pathname
+            const messages = /\/messages$/.test(path)
+            const now = await getAuth()
+            if (now?.type !== "api" || !now.key) return (messages ? anthropicError : errorResponse)({ status: 401, message: "Devin isn't signed in" })
+            if (!messages && !/\/chat\/completions$/.test(path)) {
+              const e = { status: 404, message: "only chat completions and messages are served" }
+              return /\/messages\//.test(path) ? anthropicError(e) : errorResponse(e)
+            }
             let chat
             try {
               const b = init.body ?? (input instanceof Request ? await input.clone().text() : undefined)
               chat = JSON.parse(typeof b === "string" ? b : dec.decode(b))
             } catch {
-              return errorResponse({ status: 400, message: "a request that isn't JSON" })
+              return (messages ? anthropicError : errorResponse)({ status: 400, message: "a request that isn't JSON" })
             }
             const { key, server } = await live(now)
             const families = await familiesFor(key, server)
-            return complete({ key, server, families }, chat, init.signal)
+            return (messages ? completeMessages : complete)({ key, server, families }, chat, init.signal)
           },
         }
       },
@@ -2513,4 +2795,4 @@ export async function DevinAuthPlugin({ client } = {}) {
 }
 
 // for tests
-export const _internal = { parseFree, parsePrices, geminiSchema, freeIDs, outID, inID, objectRoot, seesImages, imagesFor, forgetSaid: () => said.clear(), parseModelConfigs, parseConfigFamilies, SNAPSHOT_IMAGES, withImages, forgetImages: () => (seen = null), effortOf, runtimeModel, configModel, live, build, failure, complete, parseFamilies, listed, variantFor, familiesOf, SNAPSHOT, parseStatus, readsHome, tierName, whoOfStatus, whoByKey, success, familiesFor, readCredentials, credentials, fields, frame, PB, events, frames, v2Chat, v2ToolParts, v2FileData, v2Effort, v2ResponseFormat, v2Usage, v2Auth, v2Credential, v2Models, devinLanguage, v2Setup, connKey }
+export const _internal = { buildMessages, completeMessages, anthropicEffort, encodeMsg, parseFree, parsePrices, geminiSchema, freeIDs, outID, inID, objectRoot, seesImages, imagesFor, forgetSaid: () => said.clear(), parseModelConfigs, parseConfigFamilies, SNAPSHOT_IMAGES, withImages, forgetImages: () => (seen = null), effortOf, runtimeModel, configModel, live, build, failure, complete, parseFamilies, listed, variantFor, familiesOf, SNAPSHOT, parseStatus, readsHome, tierName, whoOfStatus, whoByKey, success, familiesFor, readCredentials, credentials, fields, frame, PB, events, frames, v2Chat, v2ToolParts, v2FileData, v2Effort, v2ResponseFormat, v2Usage, v2Auth, v2Credential, v2Models, devinLanguage, v2Setup, connKey }

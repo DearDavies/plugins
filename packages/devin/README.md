@@ -57,6 +57,19 @@ The plugin's `fetch` handles this:
     with its result, as magpie's built-in sends them: a tool message's own
     `image_url` parts, and the ones magpie's gateway puts in the user
     message after the results ("[From the result of …]").
+- The Claude models are asked on Anthropic's Messages API
+  (`@ai-sdk/anthropic`, `POST …/devin/v1/messages`); every other model
+  stays on chat completions (since 0.1.28, #566).
+  - Each text block, system block, tool call turn and tool result is a
+    `ChatMessagePrompt` of its own, in the order the client sent them, and
+    one the client marked with `cache_control` carries
+    `prompt_cache_options {type: EPHEMERAL}` (field 8), as the devin CLI
+    marks its own. Blocks joined into one message lose the mark: a grown
+    history then read only ~558 tokens from the cache.
+  - Claude Code's `x-anthropic-billing-header` line isn't sent: its
+    `cch` changes every turn.
+  - The reply comes back as Anthropic's message or events, with the
+    cache's read and write in `usage`. `/messages/count_tokens` is a 404.
 - A request past 8 KiB goes gzipped, as the CLI sends it (since 0.1.21,
   #275): Devin turns a body past 10 MiB away with 413.
 - It turns the streamed reply back into a chat completion, streamed or
