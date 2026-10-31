@@ -4,7 +4,7 @@
 // this service's own Host. Everything here runs against a fake gateway on a
 // free port, with a temporary config folder; nothing reaches the network.
 import { afterAll, beforeAll, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { request } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -305,3 +305,59 @@ test("an empty configDir reads the library from the real config folder", async (
   }
 })
 
+// ---------- added in 0.1.4 ----------
+
+test("composeSystem drops the user prompt when systemEnabled is false", async () => {
+  const { composeSystem } = await import("./lib/library.mjs")
+  const on = await composeSystem({ system: "PROBE_SYSTEM_TEXT_XYZ", systemEnabled: true })
+  const off = await composeSystem({ system: "PROBE_SYSTEM_TEXT_XYZ", systemEnabled: false })
+  expect(on).toContain("PROBE_SYSTEM_TEXT_XYZ")
+  expect(off).not.toContain("PROBE_SYSTEM_TEXT_XYZ")
+})
+
+test("stdio MCP servers get a workspace of their own", async () => {
+  const { workspaceDir } = await import("./lib/mcp.mjs")
+  const dir = workspaceDir()
+  expect(dir).toContain("magpie-chat")
+  expect(dir).toContain("workspace")
+  expect(existsSync(dir)).toBe(true)
+})
+
+test("the gateway candidates include the port from magpie settings.json", async () => {
+  const { gatewayCandidates } = await import("./lib/gateway.mjs")
+  writeFileSync(join(cfg, "settings.json"), JSON.stringify({ port: 18086 }))
+  const list = gatewayCandidates({})
+  expect(list.some((u) => u.includes(":18086"))).toBe(true)
+})
+
+// ---------- review feedback ----------
+
+test("the chat UI never auto-loads a remote image", () => {
+  const app = readFileSync(join(dir, "chat", "app.js"), "utf8")
+  const start = app.indexOf("function safeImgSrc")
+  const end = app.indexOf("function remoteImgLink")
+  expect(start).toBeGreaterThan(0)
+  expect(end).toBeGreaterThan(start)
+  // 把函数抽出来真跑一遍：只扫源码里的字面量，换个写法就能绕过去
+  const safeImgSrc = new Function(app.slice(start, end) + "\nreturn safeImgSrc")()
+  const png = "data:image/png;base64,iVBORw0KGgo="
+  expect(safeImgSrc(png)).toBe(png)
+  const svg = "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4="
+  expect(safeImgSrc(svg)).toBe(svg)
+  for (const bad of [
+    "https://a.png",
+    "HTTPS://a.png",
+    "http://a.png",
+    "//a.png",
+    "blob:https://a.png",
+    "data:text/html;base64,PHNjcmlwdD4=",
+  ]) {
+    expect(safeImgSrc(bad)).toBe("")
+  }
+})
+
+test("finish() renders a reply that arrived in one chunk", () => {
+  const app = readFileSync(join(dir, "chat", "app.js"), "utf8")
+  // 不能只判 .md-stable：整段一次到达时那个结构根本不存在
+  expect(app).toMatch(/else if \(refs\.body && refs\.msg\.content\) renderMarkdown\(refs\.body, refs\.msg\.content\)/)
+})

@@ -104,7 +104,8 @@ export async function libraryView(dir = configDir()) {
 // 组装 system prompt：用户自己写的 + 勾选的指令 + 勾选的技能
 export async function composeSystem(settings, dir = configDir()) {
   const parts = [];
-  const mine = String(settings.system || "").trim();
+  // 开关关掉时，用户手写的那段不进去（勾选的指令和技能照旧生效）
+  const mine = settings.systemEnabled === false ? "" : String(settings.system || "").trim();
   if (mine) parts.push(mine);
   const [instructions, skills] = await Promise.all([readInstructions(dir), readSkills(dir)]);
   for (const id of settings.instructions || []) {

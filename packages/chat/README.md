@@ -18,14 +18,15 @@ It then has a tab, **Chat** (对话, 對話, チャット), under Plugins in the
 
 ## What it does
 
-- **magpie's models.** The list comes from the gateway's `/v1/models`. Models with reasoning levels get an effort picker.
+- **magpie's models.** The list comes from the gateway's `/v1/models`. Models with reasoning levels get an effort picker. Each model shows its brand icon (OpenAI, Claude, Gemini, DeepSeek, Qwen, Kimi, GLM, MiniMax and more) in the picker and next to its name in the transcript. The icons come from [@lobehub/icons](https://github.com/lobehub/lobe-icons) (MIT); see `chat/icons/models/NOTICE`.
 - **magpie's library.** Tick instructions and skills from `~/.config/magpie/library/` (folded into the system prompt), and MCP servers from `library.json` (their tools run as real `tool_calls`, at most 8 rounds, Streamable HTTP and stdio).
-- **Images and files.** Pick, drop or paste them. Images go to the model as `image_url`.
+- **Images and files.** Pick, drop or paste them. Images go to the model as `image_url`. Replies can carry base64 data-URI images, which render inline and open full size on click. Remote `![alt](https://…)` images are shown as a link instead of being loaded — fetching them automatically would let a reply make the page request an arbitrary URL.
 - **Streaming.** Reasoning unfolds while it arrives, then collapses. While the answer streams, the page follows it down unless you scroll up yourself; scroll back to the bottom and it resumes.
 - **Model status.** Every reply ends with a line saying what the model is doing: `Magpie正在觅食ing… · 2s` with a running timer while it generates, green `Magpie找到了食物！ · 2s` when done, red `Magpie没有找到食物` on failure. The elapsed time is kept with the conversation.
 - **Math.** `$…$`, `$$…$$`, `\(…\)` and `\[…\]` render with a bundled KaTeX 0.16.11. No CDN.
 - **Conversations kept**, pinned, renamed or deleted, under `~/.config/magpie/magpie-chat/`. Clicking "+" starts a draft row in the sidebar; it becomes a real conversation as soon as you send, and disappears if you switch away without writing anything. The pencil button on each row renames it inline.
 - **Layout.** Conversation width and composer width are adjustable in the sidebar; a **Sync** switch keeps the two equal — move either one and the other follows.
+- **System prompt switch.** The text you write under 系统提示词 can be turned off without deleting it; ticked instructions and skills still apply.
 - **Looks like magpie.** Colors and fonts come from the window's theme.
 
 It registers no provider, asks for no sign-in and stores no credentials of its own. Every request goes out through magpie's gateway, so usage, routing and failover are the same as an agent's.

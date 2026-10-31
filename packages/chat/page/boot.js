@@ -62,8 +62,27 @@
     }
   }
 
+  // WebKit 在目标不可达时不会报错：location.replace 失败了也当没事，
+  // 页面就永远停在「正在连接到本地对话服务…」。5 秒后如果这份文档还活着，
+  // 说明跳转根本没走成，换成能操作的提示。
+  function armTimeout(p) {
+    setTimeout(function () {
+      var said = document.getElementById("said");
+      if (!said) return;
+      said.textContent = "本地对话服务没有在运行（127.0.0.1:" + p + "）";
+      if (document.getElementById("boot-retry")) return;
+      var btn = document.createElement("button");
+      btn.id = "boot-retry";
+      btn.type = "button";
+      btn.textContent = "重试";
+      btn.style.cssText = "margin-left:10px;padding:2px 12px;font:inherit;cursor:pointer;";
+      btn.addEventListener("click", function () { location.reload(); });
+      said.parentNode.appendChild(btn);
+    }, 5000);
+  }
   // magpie 给了 service 就走它：这是 magpie web 在自己地址上的转发，远程也能用。
   if (service) {
+    armTimeout(port);
     location.replace(service + "?" + q.toString());
     return;
   }
@@ -78,6 +97,7 @@
     showRemote(port, target);
     return;
   }
+  armTimeout(port);
   location.replace(target);
 })();
 

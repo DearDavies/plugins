@@ -9,7 +9,7 @@ import { join, extname, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { composeSystem, configDir, groupIcons, libraryView, providerIcons, readJson, readMcp, readProviderIcon } from "./library.mjs";
 import { chatCompletions, gatewayURL, listModels, resolveGateway, sseChunks } from "./gateway.mjs";
-import { callTool, closeAll, listTools } from "./mcp.mjs";
+import { callTool, closeAll, listTools, workspaceDir } from "./mcp.mjs";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const UI_ROOT = join(here, "..", "chat");
@@ -286,7 +286,9 @@ function sse(res, type, data) {
 // 工具清单写在 system 里会和 function 定义重复一遍，所以只给一句交代。
 function toolsHint(tools) {
   if (!tools.length) return "";
-  return `# 工具\n\n你可以调用用户配置的 MCP 工具（共 ${tools.length} 个）。需要时直接调用，不要臆造结果；用不上就直接回答。`;
+  // 只说"有工作区"就够了：绝对路径会把本机用户名带进 system prompt，
+  // 而这段文字是发给模型供应商的。服务端的 cwd 已经保证相对路径落在那里。
+  return "# 工具\n\n你可以调用用户配置的 MCP 工具（共 " + tools.length + " 个）。需要时直接调用，不要臆造结果；用不上就直接回答。\n\n工具用相对路径读写文件时，落在对话页自己的工作目录里。"
 }
 
 // 工具的 schema 是提示词里最大的一块：GitHub 那 46 个工具光描述和参数就有上千万字符。
@@ -341,7 +343,7 @@ function toGatewayContent(m) {
 }
 
 // 一轮对话：可多次工具调用；把每条增量转成 SSE 发回浏览器
-async function runChat({ res, body, settings, store }, controllers) {
+async function runChat({ res, body, settings, store, options }, controllers) {
   const clientId = String(body.clientId || "");
   const abort = new AbortController();
   if (clientId) controllers.set(clientId, abort);
@@ -434,7 +436,7 @@ async function runChat({ res, body, settings, store }, controllers) {
     }
   }
 
-  sse(res, "start", { model, tools: tools.map((t) => t.name), gateway: await resolveGateway().catch(() => gatewayURL()) });
+  sse(res, "start", { model, tools: tools.map((t) => t.name), gateway: await resolveGateway(options).catch(() => gatewayURL(options)) });
 
   let usageTotal = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
   try {
@@ -577,7 +579,9 @@ export async function startServer({ configDir: dirArg, options = {} } = {}) {
           const settings = await store.settings();
           let list = [];
           let gatewayError = "";
-          await resolveGateway(options).catch(() => "");
+          // 把实际探测成功的网关地址报给页面
+          let gateway = "";
+          try { gateway = await resolveGateway(options); } catch { gateway = gatewayURL(options); }
           try { list = await models(options); } catch (err) { gatewayError = String(err?.message || err); }
           // 模型图标：magpie 的 providers.json 里有各供应商的 logo，能对上就带上
           try {
@@ -597,7 +601,7 @@ export async function startServer({ configDir: dirArg, options = {} } = {}) {
           return send(res, 200, {
             port,
             version: VERSION,
-            gateway: gatewayURL(options),
+            gateway,
             settings,
             models: list,
             library: await libraryView(dir),
@@ -715,7 +719,7 @@ export async function startServer({ configDir: dirArg, options = {} } = {}) {
           const body = await readBody(req);
           const settings = await store.settings();
           sseHead(res);
-          await runChat({ res, body, settings, store }, controllers);
+          await runChat({ res, body, settings, store, options }, controllers);
           return;
         }
         if (path === "/api/chat/stop" && req.method === "POST") {
@@ -788,15 +792,8 @@ export async function startServer({ configDir: dirArg, options = {} } = {}) {
   OWN = new Set([`http://127.0.0.1:${actualPort}`, `http://localhost:${actualPort}`]);
   HOSTS = new Set([`127.0.0.1:${actualPort}`, `localhost:${actualPort}`]);
 
-  // 把实际端口写到配置目录，带路页（page/boot.js）会来读 ——
-  // 端口可能是换过的，页面不能假设永远是 3477。
-  try {
-    // dir 可能是空字符串（没传 configDir），交给 dataDir 落到默认配置目录
-    const cfgRoot = dataDir(dir);
-    writeFileSync(join(cfgRoot, "port.json"), JSON.stringify({ port: actualPort, at: Date.now() }));
-  } catch (err) {
-    console.warn("[page-chat] 端口文件写失败:", err?.message || err);
-  }
+  // 这里以前会写 port.json 想让带路页读实际端口，但页面 CSP 是 connect-src none，读不到。
+
 
   return { port: actualPort, server, store, close: async () => { await closeAll(); server.close(); } };
 }
