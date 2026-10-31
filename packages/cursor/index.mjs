@@ -28,7 +28,7 @@
 //
 // OpenCode speaks chat completions to it (@ai-sdk/openai-compatible); the
 // fetch here answers them.
-import { NATIVE_LIMITS, nativeSessions, NativeSessionError, nativeFields, nativeMcpArgs, Quiet, setWireTrace } from "./native-session.mjs"
+import { NATIVE_LIMITS, nativeSessions, NativeSessionError, nativeFields, nativeMcpArgs, pendingCalls, Quiet, setWireTrace, StepCalls } from "./native-session.mjs"
 import { isDeepStrictEqual } from "node:util"
 import http2 from "node:http2"
 import { STATUS_CODES } from "node:http"
@@ -2747,7 +2747,7 @@ async function runNative({ tok, base, id, tools, conv, convID, signal, maxMode, 
 
 // runOnce is one Run of the chat on the agent API at base: an async
 // iterator of the answer's pieces, or the error it failed with before any.
-async function runOnce({ tok, base, id, tools, conv, convID, signal, maxMode, params }) {
+async function runOnce({ tok, base, id, tools, conv, convID, signal, maxMode, params, why }) {
   // the Run's conversation_id, a new one when nothing names the session:
   // its usage event is found by it
   const cid = convID || randomUUID()
@@ -2778,7 +2778,7 @@ async function runOnce({ tok, base, id, tools, conv, convID, signal, maxMode, pa
   let closed = false
   let heartbeat
   // a Run Cursor stops answering ends, as a retained one does (#2672)
-  const quiet = new Quiet(NATIVE_LIMITS, () => close(), { path: "stateless", model: id })
+  const quiet = new Quiet(NATIVE_LIMITS, () => close(), { path: "stateless", model: id, why })
   const send = (msg) => {
     if (!closed && !req.destroyed && req.writable) {
       quiet.trace?.frame("out", msg)
@@ -2822,6 +2822,7 @@ async function runOnce({ tok, base, id, tools, conv, convID, signal, maxMode, pa
     close,
     stepUsage: book.own,
     owedUsage: book.owed,
+    note: (name) => quiet.trace?.event(name),
   })
   const wrapped = (async function* () {
     try {
@@ -2852,7 +2853,7 @@ async function runOnce({ tok, base, id, tools, conv, convID, signal, maxMode, pa
 
 // decode follows the server's messages into the answer's pieces until the
 // turn ends, or the model has made its tool calls.
-async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage, owedUsage }) {
+async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage, owedUsage, note }) {
   let calls = 0
   // answered: the step's calls answered here (a refusal, the MCP tool
   // list), which Cursor's count of the step's calls takes in too (#142)
@@ -2860,14 +2861,18 @@ async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage,
   // ended: Cursor said what the turn used
   let ended = false
   let listed = 0
+  // what Cursor said of the step's calls: those it completed by itself
+  // count toward listed too, and never come as an exec (plugins#550)
+  const step = new StepCalls(fields)
   // stepDone is whether every call the step listed has come. A step whose
   // calls were all answered here goes on on Cursor's side, under a count of
   // its own.
   const stepDone = () => {
-    if (!listed || calls + answered < listed) return false
+    if (!listed || calls + answered + step.completed < listed) return false
     if (calls > 0) return true
     listed = 0
     answered = 0
+    step.nextStep()
     return false
   }
   let said = 0
@@ -2984,6 +2989,16 @@ async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage,
                     return
                   }
                   break
+                case 2: // a call started on the client
+                case 3: // a call completed: by Cursor itself when it never started here
+                case 7: // a call the model is writing
+                  // still named in an empty reply's list: only their ids are read
+                  count(seen.updates, u.num)
+                  if (step.update(u.num, uf) && (note?.("completed by Cursor"), stepDone())) {
+                    yield await settled()
+                    return
+                  }
+                  break
                 default:
                   count(seen.updates, u.num)
               }
@@ -2991,6 +3006,7 @@ async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage,
             break
           case 2: {
             // exec_server_message: the server asks the client to run something
+            step.exec(m.data)
             const call = exec(m.data, tools, send, closeExec, seen.refused)
             if (call) {
               said += call.args.length
@@ -3003,6 +3019,18 @@ async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage,
             }
             break
           }
+          case 3:
+            // conversation_checkpoint_update: Cursor's state. Once the step
+            // has its count, a state waiting on just the calls handed to the
+            // caller is a step Cursor has finished: what more the count
+            // says will not come (plugins#550)
+            if (listed && calls > 0 && pendingCalls(m.data, fields) === calls) {
+              note?.("waited on")
+              yield await settled()
+              return
+            }
+            count(seen.messages, m.num)
+            break
           case 4: {
             // kv_server_message: a blob wanted, or one to keep
             const kv = fields(m.data)
@@ -3033,7 +3061,10 @@ async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage,
   } catch (e) {
     // gone quiet is no answer, calls or not: the step's count never came
     if (e?.quiet) {
-      yield { error: { status: e.status, message: e.message } }
+      // with what came of the step's calls, as the native path's batch
+      // error says it (plugins#550)
+      const batch = calls || listed ? `; the step's tool count ${listed || "not sent"}: ${calls} calls came, ${answered} answered here, ${step.completed} completed by Cursor` : ""
+      yield { error: { status: e.status, message: batch ? e.message.replace(/( \(try again\))?$/, batch + "$1") : e.message } }
       return
     }
     if (calls > 0 && /EOF/.test(e?.message ?? "")) {
@@ -3207,10 +3238,11 @@ async function answerOf(auth, chat, signal, session = "") {
       // uses the original history builder/decoder without cancelling a live parent.
       const native = prepared.fallback ? null : nativeSessions.create(prepared, { id, maxMode, params }, { pb, exec, usageOf, failure })
       const args = { tok, base, id, tools, conv, convID, signal, maxMode, params }
-      let response = native ? await runNative({ ...args, native }) : await runOnce(args)
+      let response = native ? await runNative({ ...args, native }) : await runOnce({ ...args, why: prepared.fallback || "retention capacity or reservation unavailable" })
       const rebuild = async () => {
-        const fallback = await runOnce(args)
-        fallback.diagnostic = "stateless; bootstrap=imported-history; reason=" + (response.error?.continuityReason || "missing-batch-count")
+        const why = response.error?.continuityReason || "missing-batch-count"
+        const fallback = await runOnce({ ...args, why })
+        fallback.diagnostic = "stateless; bootstrap=imported-history; reason=" + why
         return fallback
       }
       // A missing or conflicting native batch count may be retried once,

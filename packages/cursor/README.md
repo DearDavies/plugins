@@ -123,8 +123,11 @@ caller's tool results is bounded by the 120 seconds above instead.
 
 Cursor's count of a step's tool calls includes calls the plugin answers itself:
 a tool the request doesn't have is refused to the model, and Cursor's own
-`get_mcp_tools` is answered with the request's tools. The step's calls are the
-rest.
+`get_mcp_tools` is answered with the request's tools. It also includes calls
+Cursor completes by itself, which it writes and completes in the step but never
+starts on the client or sends to it; those count toward it too. Once the count
+has come, a checkpoint whose state waits on exactly the calls the caller was
+given also ends the step (#550). The step's calls are the rest.
 
 These are retention limits. A missing, expired, restarted, busy, incompatible,
 or full owner uses the original history reconstruction and stateless decoder
@@ -312,7 +315,10 @@ portable data folder. The newest 20 are kept. A file holds the Run's
 frames in order, both ways, as each frame's time (ms from the Run's
 start), size, kind (text, thinking, checkpoint, heartbeat, ...), field
 numbers and sizes, and the field numbers and sizes one level inside them,
-plus the error and the model id. No prompt, reply or thinking text, tool
+plus the error and the model id. A few of Cursor's numbers are kept too: a
+tool count's value, which kind of call (the field number of Cursor's tool
+call) a call update is about, how many calls a checkpoint waits on, and,
+for a Run that went without the native session, why. No prompt, reply or thinking text, tool
 name or argument, blob or checkpoint content, token, header, account or
 conversation id is written; the error's message has anything shaped like
 an email, id or token taken out. Look the file over before you attach it.

@@ -55,7 +55,13 @@ const failureOf = (e) => ({ status: e?.status ?? 502, message: e?.message ?? Str
 
 // kindOf is what a frame of AgentServerMessage is, for Quiet: a heartbeat
 // alone, or what an error names as the last thing Cursor sent
-const UPDATES = { 1: "text", 4: "thinking", 14: "turn end", 27: "tool count" }
+// (names after cursor-agent's agent.v1 InteractionUpdate, 2026.10.01)
+const UPDATES = {
+  1: "text", 2: "tool call started", 3: "tool call completed", 4: "thinking", 5: "thinking done",
+  6: "user message", 7: "partial tool call", 8: "token count", 9: "summary", 10: "summary started",
+  11: "summary done", 12: "shell output", 14: "turn end", 15: "tool call delta", 16: "step started",
+  17: "step done", 27: "tool count",
+}
 const MESSAGES = { 2: "tool call", 3: "checkpoint", 4: "blob request" }
 function kindOf(f) {
   if (f.end) return "stream end"
@@ -249,6 +255,26 @@ export function scrub(s) {
     .replace(/[A-Za-z0-9_\-+/=.]{24,}/g, "<redacted>")
     .slice(0, 2000)
 }
+// detail is what a trace keeps of an inbound frame past its shape, all of
+// it numbers of Cursor's protocol, never content (plugins#550): a tool
+// count's number, the kind of call (ToolCall's field) a call update is
+// of, and how many calls a checkpoint's state waits on
+function detail(data) {
+  const out = {}
+  for (const m of nativeFields(data)) {
+    if (m.num === 1) {
+      for (const u of nativeFields(m.data)) {
+        if (u.num === 27) out.count = num(nativeFields(u.data), 1)
+        else if (u.num === 2 || u.num === 3 || u.num === 7) {
+          const tc = field(nativeFields(u.data), 2)
+          const kind = tc && nativeFields(tc.data)[0]
+          if (kind) out.tool = kind.wire === 2 ? [kind.num, nativeFields(kind.data)[0]?.num ?? 0] : [kind.num]
+        }
+      }
+    } else if (m.num === 3) out.pending = pendingCalls(m.data)
+  }
+  return out
+}
 export class WireTrace {
   static open(meta) {
     let dir = ""
@@ -258,6 +284,8 @@ export class WireTrace {
   constructor(dir, meta = {}) {
     this.dir = dir
     this.meta = { path: String(meta.path ?? ""), model: String(meta.model ?? "") }
+    // why a Run went stateless: the retention fallback's reason
+    if (meta.why) this.meta.why = String(meta.why)
     this.started = Date.now()
     this.head = []
     this.tail = []
@@ -281,6 +309,7 @@ export class WireTrace {
     if (dir === "in") entry.kind = kind ?? "heartbeat"
     if (dir === "in" && f.end) entry.end = true
     else try { entry.fields = shape(data, true) } catch { entry.malformed = true }
+    if (dir === "in" && !f.end) try { Object.assign(entry, detail(data)) } catch {}
     this.push(entry)
   }
   event(name, extra = {}) {
@@ -437,6 +466,67 @@ export function nativeMcpArgs(input, limits = NATIVE_LIMITS) {
 const field = (fs, n) => fs.find((f) => f.num === n)
 const str = (fs, n) => field(fs, n)?.data.toString("utf8") ?? ""
 const num = (fs, n) => field(fs, n)?.n ?? 0
+
+// StepCalls is what Cursor says of a step's calls besides its execs
+// (plugins#550). InteractionUpdate 2 (tool_call_started), 3
+// (tool_call_completed) and 7 (partial_tool_call) each carry the call's
+// call_id (field 1). A call Cursor completed by itself, never started on
+// the client and never sent as an exec, is in tool_requests_listed's count
+// all the same, and no exec of it will come: 0.2.34 waited for it while
+// Cursor waited for the one call it had sent, 240 s, heartbeats only.
+// parse is the path's field reader.
+export class StepCalls {
+  constructor(parse) {
+    this.parse = parse
+    this.started = new Set()
+    this.execs = new Set() // the short strings of each exec's args: its tool_call_id among them
+    this.partial = new Set() // calls the model is writing in this step
+    this.byCursor = new Set()
+  }
+  // update takes an InteractionUpdate's own field (num) and its fields; it
+  // says whether a call was completed by Cursor: one this step wrote (7)
+  // and completed (3) with no start on the client (2) and no exec. A
+  // completion of an earlier step's call is never counted again.
+  update(n, uf) {
+    if (n !== 2 && n !== 3 && n !== 7) return false
+    const id = str(uf, 1)
+    if (!id) return false
+    if (n === 2) this.started.add(id)
+    if (n === 7) this.partial.add(id)
+    if (n !== 3) return false
+    if (!this.partial.has(id) || this.started.has(id) || this.execs.has(id) || this.byCursor.has(id)) return false
+    this.byCursor.add(id)
+    return true
+  }
+  // exec notes an exec's args, whatever its kind: each kind keeps its
+  // tool_call_id at a field of its own (ShellArgs 4, ReadArgs 2, McpArgs 3)
+  exec(data) {
+    try {
+      for (const e of this.parse(data)) {
+        if (e.wire !== 2 || e.num === 15 || e.num === 19) continue
+        for (const a of this.parse(e.data)) if (a.wire === 2 && a.data.length && a.data.length <= 512) this.execs.add(a.data.toString("utf8"))
+      }
+    } catch {}
+  }
+  get completed() {
+    return this.byCursor.size
+  }
+  // nextStep starts the next step's count
+  nextStep() {
+    this.partial.clear()
+    this.byCursor.clear()
+  }
+}
+// pendingCalls is how many calls a checkpoint (ConversationStateStructure)
+// says Cursor waits on: its pending_tool_calls, field 4; null when it
+// can't be read
+export function pendingCalls(data, parse = nativeFields) {
+  try {
+    return parse(data).filter((f) => f.num === 4).length
+  } catch {
+    return null
+  }
+}
 
 function argsOf(s) {
   try {
@@ -737,6 +827,8 @@ class NativeSession {
     this.ac = new AbortController()
     this.execs = new Map()
     this.nativeCalls = new Map()
+    // what Cursor said of the step's calls besides its execs (plugins#550)
+    this.stepCalls = new StepCalls(nativeFields)
     this.blobs = new Map()
     this.knownHashes = new Set()
     this.blobSize = 0
@@ -934,6 +1026,7 @@ class NativeSession {
   // caller's results, or after a step whose calls were all answered here.
   nextStep(estimate) {
     this.steps++
+    this.stepCalls.nextStep()
     this.quiet.nextStep(this.steps)
     this.stepSaid = this.said
     if (estimate != null) this.stepEstimate = estimate
@@ -951,7 +1044,7 @@ class NativeSession {
     this.batchTimer = later(() => {
       const s = this.segment
       if (s.expected == null && s.calls.length && !this.resultSubmitted) this.missingCount()
-      else this.fail({ status: 502, message: `Cursor did not complete its declared native tool batch: ${s.calls.length} of ${s.expected ?? "?"} calls came, ${s.answered} answered here, none since ${Date.now() - since} ms` })
+      else this.fail({ status: 502, message: `Cursor did not complete its declared native tool batch: ${s.calls.length} of ${s.expected ?? "?"} calls came, ${s.answered} answered here${this.stepCalls.completed ? `, ${this.stepCalls.completed} completed by Cursor` : ""}, none since ${Date.now() - since} ms` })
     }, this.limits.batchWait)
   }
   missingCount() {
@@ -965,6 +1058,23 @@ class NativeSession {
     if (this.terminal || this.state === "awaiting-results") return
     this.segment.answered++
     if (this.batchTimer) this.waitForBatch()
+    this.sealBatch()
+  }
+  // A call of the step Cursor completed by itself (plugins#550): in its
+  // count, and never sent as an exec.
+  completedByCursor() {
+    if (this.terminal || this.state === "awaiting-results") return
+    if (this.batchTimer) this.waitForBatch()
+    this.sealBatch()
+  }
+  // A checkpoint whose state waits on just the calls handed to the caller,
+  // after the step's count, is a step Cursor has finished: what more the
+  // count says will not come (plugins#550).
+  waitedOn(data) {
+    const s = this.segment
+    if (this.terminal || this.state === "awaiting-results" || s.closed || s.expected == null || !s.calls.length) return
+    if (pendingCalls(data) !== s.calls.length) return
+    s.waitedOn = true
     this.sealBatch()
   }
   listed(count) {
@@ -986,7 +1096,8 @@ class NativeSession {
     if (segment.expected == null) return
     const made = segment.calls.length + segment.answered
     if (made > segment.expected) invalid("native tool batch exceeded its declared count", 502)
-    if (made !== segment.expected || segment.closed) return
+    // the calls Cursor completed by itself make up the rest (plugins#550)
+    if ((made + this.stepCalls.completed < segment.expected && !segment.waitedOn) || segment.closed) return
     if (!segment.calls.length) {
       // Every call of the step was answered here: Cursor goes on with the
       // turn by itself, and its next step lists a count of its own.
@@ -1183,10 +1294,14 @@ class NativeSession {
                   if (this.error) return
                 } else if (u.num === 13) {
                   if (this.batchTimer && !this.terminal && this.state !== "awaiting-results") this.waitForBatch()
+                } else if ((u.num === 2 || u.num === 3 || u.num === 7) && this.stepCalls.update(u.num, uf)) {
+                  this.completedByCursor()
+                  if (this.error) return
                 }
               }
               break
             case 2: {
+              this.stepCalls.exec(m.data)
               const c = exec(m.data, this.chatTools, (b) => this.send(b), (id) => this.execClose(id), null, true)
               if (c) this.acceptCall(c)
               // request_context is Cursor asking for the environment, not a call
@@ -1195,6 +1310,7 @@ class NativeSession {
             }
             case 3:
               this.checkpointReceived(m.data)
+              this.waitedOn(m.data)
               break
             case 4: {
               const kv = nativeFields(m.data)
