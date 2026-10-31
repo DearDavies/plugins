@@ -2,7 +2,7 @@
 
 [![Latest release](https://img.shields.io/github/v/release/QingJ01/magpie-agent-office)](https://github.com/QingJ01/magpie-agent-office/releases)
 [![magpie ≥ 0.1.1318](https://img.shields.io/badge/magpie-%E2%89%A5%200.1.1318-4f46e5)](https://usemagpie.ai)
-[![Tests](https://img.shields.io/badge/tests-44%20passing-22a35a)](#test)
+[![Tests](https://img.shields.io/badge/tests-54%20passing-22a35a)](#test)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **一个住在 magpie 窗口里的实时 Agent 办公室。** 直接读取各 Agent 自己的会话记录，把正在思考、执行工具、等待批准或已经完成的工作，变成太空站里的小人。支持等距 3D、俯视 2D、实时列表和可拖动的悬浮小窗。
@@ -71,6 +71,8 @@ From each agent's **own session file**, as the agent writes it — not a guess f
 | Qoder · WorkBuddy · CodeBuddy | their `projects/*/*.jsonl` (Claude Code's format) |
 
 The `*_HOME` / `*_CONFIG_DIR` variables those agents honour are honoured here too. What each file says decides the status outright: a tool call with no result yet is **running**, an approval asked (Codex's `exec_approval_request`, DeepSeek Harness's `approval/asked`, Gemini's `awaiting_approval`) is **waiting for you**, a question tool is **asked you something**, the turn's end is **done**, an interruption is **stopped**, an error turn is **error**. A turn whose file hasn't moved for ten minutes is shown as stuck.
+
+An agent killed mid-turn writes no end at all: one agent running another (`claude -p` or `codex exec` from a Bash tool) and interrupting it leaves the other's file mid-turn. Claude Code keeps a file per running process (`sessions/<pid>.json`), so a Claude Code session with no running process is **stopped**, at once. Codex and the other agents keep nothing a reader can check, so such a session shows as stuck. Any agent not at work — stuck, failed, stopped, done or waiting — can be taken out of the office with **Clear** (清除) in its panel; it comes back when its session moves again.
 
 Every other agent (Cursor, OpenCode, Copilot, Kimi…) shows while it works through magpie: the module is also an [asynchronous gateway hook](https://usemagpie.ai/docs/plugins#gateway-request) that sees its requests. The hook returns no body, so no request changes.
 

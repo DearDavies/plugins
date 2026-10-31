@@ -20,6 +20,16 @@ const TAIL = 512 * 1024 // what is read of a big file's end
 // is decoded at most once every ZSTD_EVERY: its last facts stand meanwhile.
 const ZSTD_MAX = 8 * 1024 * 1024
 const ZSTD_EVERY = 4000
+// Claude Code keeps one file per running process, <config>/sessions/<pid>.json
+// ({pid, sessionId, …}). It takes the file away when it ends on SIGINT or
+// SIGTERM and leaves it when SIGKILLed, so a session with no living process
+// in that folder has stopped, whatever its last line says. That is the case
+// of an agent another agent ran and interrupted (`claude -p` killed from the
+// shell): its file ends mid-turn, and without this it read as at work and
+// then stuck for good. A turn quiet less than GONE_AFTER is not judged: the
+// process may be starting.
+const GONE_AFTER = 10e3
+const MIDTURN = new Set(["thinking", "tool", "approval", "ask"])
 
 function env(k) { return (process.env[k] || "").trim() }
 function home(...p) { return join(env("HOME") || homedir(), ...p) }
@@ -38,17 +48,17 @@ export function sources() {
   const codebuddy = env("CODEBUDDY_CONFIG_DIR") ? expand(env("CODEBUDDY_CONFIG_DIR")) : home(".codebuddy")
   const jsonl = (n) => n.endsWith(".jsonl")
   return [
-    { agent: "claude", kind: "claude", root: join(claude, "projects"), depth: 1, match: jsonl },
+    { agent: "claude", kind: "claude", root: join(claude, "projects"), depth: 1, match: jsonl, live: join(claude, "sessions") },
     { agent: "codex", kind: "codex", root: join(codex, "sessions"), depth: 3, match: (n) => n.startsWith("rollout-") && n.endsWith(".jsonl") },
     { agent: "dsh", kind: "dsh", root: join(dsh, "sessions"), depth: 2, match: (n) => n === "session.v4.jsonl.zstd" || n === "session.v4.jsonl" },
     { agent: "gemini", kind: "gemini", root: home(".gemini", "tmp"), depth: 2, match: (n) => n.startsWith("session-") && (n.endsWith(".json") || n.endsWith(".jsonl")) },
     { agent: "qwen", kind: "gemini", root: home(".qwen", "tmp"), depth: 2, match: (n) => n.startsWith("session-") && (n.endsWith(".json") || n.endsWith(".jsonl")) },
     { agent: "pi", kind: "pi", root: join(pi, "sessions"), depth: 1, match: jsonl },
     { agent: "omp", kind: "pi", root: home(".omp", "agent", "sessions"), depth: 1, match: jsonl },
-    { agent: "qoder", kind: "claude", root: join(qoder, "projects"), depth: 1, match: jsonl },
-    { agent: "qoder-cn", kind: "claude", root: join(qodercn, "projects"), depth: 1, match: jsonl },
-    { agent: "workbuddy", kind: "claude", root: join(workbuddy, "projects"), depth: 1, match: jsonl },
-    { agent: "codebuddy", kind: "claude", root: join(codebuddy, "projects"), depth: 1, match: jsonl },
+    { agent: "qoder", kind: "claude", root: join(qoder, "projects"), depth: 1, match: jsonl, live: join(qoder, "sessions") },
+    { agent: "qoder-cn", kind: "claude", root: join(qodercn, "projects"), depth: 1, match: jsonl, live: join(qodercn, "sessions") },
+    { agent: "workbuddy", kind: "claude", root: join(workbuddy, "projects"), depth: 1, match: jsonl, live: join(workbuddy, "sessions") },
+    { agent: "codebuddy", kind: "claude", root: join(codebuddy, "projects"), depth: 1, match: jsonl, live: join(codebuddy, "sessions") },
   ]
 }
 
@@ -83,6 +93,53 @@ function zstd(path) {
   const raw = readFileSync(path)
   if (typeof Bun !== "undefined" && Bun.zstdDecompressSync) return new TextDecoder().decode(Bun.zstdDecompressSync(raw))
   throw new Error("no zstd here")
+}
+
+// whether a process with this pid is running: EPERM is someone else's, still
+// running; only ESRCH says there is none
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true } catch (e) { return e?.code !== "ESRCH" }
+}
+
+// The sessions folder of a Claude-format agent: which session ids have a
+// running process. null when it can't say: the folder has never been seen
+// to hold such a file (an agent, or a version, that doesn't keep them), or
+// can't be read. Once a folder has held one, an empty folder means no
+// process runs.
+export function createProcesses() {
+  const dirs = new Map() // dir -> { kept: bool, files: Map(name -> { mtime, pid, id, here }) }
+  function running(dir) {
+    let d = dirs.get(dir)
+    if (!d) { d = { kept: false, files: new Map() }; dirs.set(dir, d) }
+    let names
+    try { names = readdirSync(dir) } catch { return null }
+    const seen = new Set()
+    for (const n of names) {
+      if (!/^\d+\.json$/.test(n)) continue
+      seen.add(n)
+      const p = join(dir, n)
+      let st
+      try { st = statSync(p) } catch { continue }
+      let f = d.files.get(n)
+      if (!f || f.mtime !== st.mtimeMs) {
+        let j
+        try { j = JSON.parse(readFileSync(p, "utf8")) } catch { j = null }
+        if (!j) { d.files.delete(n); return null } // half-written: unknown this time
+        // a pid of another system's (Claude Code in WSL writing here) can't
+        // be asked about from this one
+        const here = !j.pidDomain || j.pidDomain === process.platform
+        f = { mtime: st.mtimeMs, pid: Number(j.pid), id: String(j.sessionId || ""), here }
+        d.files.set(n, f)
+      }
+      if (f.id && Number.isInteger(f.pid) && f.pid > 0) d.kept = true
+    }
+    for (const n of d.files.keys()) if (!seen.has(n)) d.files.delete(n)
+    if (!d.kept) return null
+    const ids = new Set()
+    for (const f of d.files.values()) if (f.id && (!f.here || pidAlive(f.pid))) ids.add(f.id)
+    return ids
+  }
+  return { running }
 }
 
 function readerFor(kind, agent) {
@@ -120,6 +177,7 @@ export function createScanner(opts = {}) {
   const o = { days: 2, max: 40, zstdMax: ZSTD_MAX, zstdEvery: ZSTD_EVERY, ...opts }
   const files = new Map() // path -> { size, mtime, head, session }
   let srcs = o.sources || sources()
+  const procs = o.processes || createProcesses()
 
   // one pass: every changed file read again; gives the sessions, latest first
   function scan(now = Date.now()) {
@@ -137,6 +195,7 @@ export function createScanner(opts = {}) {
     for (const p of files.keys()) if (!live.has(p)) files.delete(p)
     const out = []
     let titles = null
+    const running = new Map() // a sessions folder, read once a pass
     for (const f of keep) {
       let c = files.get(f.path)
       const changed = !c || c.size !== f.size || c.mtime !== f.mtime
@@ -159,7 +218,13 @@ export function createScanner(opts = {}) {
         const t = titles.get(c.session.id)
         if (t) c.session.title = t.length > 48 ? t.slice(0, 47) + "…" : t
       }
-      out.push(c.session)
+      const s = c.session
+      if (f.src.live && MIDTURN.has(s.phase) && now - f.mtime >= GONE_AFTER) {
+        if (!running.has(f.src.live)) running.set(f.src.live, procs.running(f.src.live))
+        const ids = running.get(f.src.live)
+        if (ids && !ids.has(s.id)) { out.push({ ...s, phase: "aborted", pending: [], gone: true }); continue }
+      }
+      out.push(s)
     }
     return out
   }

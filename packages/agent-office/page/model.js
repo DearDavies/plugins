@@ -27,6 +27,7 @@
       floating: "The office has its own window here: move it, reshape it, or ✕ it to put it back",
       pipOn: "Put it back", ran: "running {n}", via: "seen through magpie's gateway", fromFiles: "from its own session file",
       live: "live", stale: "Last update {n}",
+      clear: "Clear", clearTip: "Take it out of the office. It comes back when its session moves again.",
     },
     zh: {
       title: "我的 Agent 在干嘛", needYou: "需要你", working: "工作中", doneN: "已完成",
@@ -46,6 +47,7 @@
       floating: "办公室在这里的小窗中：可拖动、可缩放，点 ✕ 放回去",
       pipOn: "放回去", ran: "已运行 {n}", via: "经 magpie 网关看到", fromFiles: "来自它自己的会话文件",
       live: "实时", stale: "最近更新 {n}",
+      clear: "清除", clearTip: "把它移出办公室；会话再有动静时会回来。",
     },
   }
   // the six the page draws, in the legend's order
@@ -106,6 +108,10 @@
   }
   function status(s, now, opts) { return state(s, now, opts).status }
 
+  // what the user may clear: an agent not at work. A stuck one (error), a
+  // stopped or finished one, and one waiting on a process that may be gone.
+  function clearable(st) { return st === "done" || st === "error" || st === "waiting" }
+
   function ago(ms, lang) {
     const t = text(lang)
     const s = Math.max(0, Math.round(ms / 1000))
@@ -153,6 +159,8 @@
   function agents(snap, now, opts = {}) {
     const o = { ...DEFAULTS, ...opts }
     const hide = HIDE[o.hideAfter] ?? HIDE["6h"]
+    // { key: at } the user cleared; it stays out until its session moves
+    const cleared = o.cleared && typeof o.cleared === "object" ? o.cleared : {}
     const out = []
     for (const s of Array.isArray(snap?.sessions) ? snap.sessions : []) {
       if (!s || typeof s.key !== "string") continue
@@ -161,6 +169,8 @@
       const quiet = now - at
       if ((st === "done" || st === "error") && quiet > hide) continue
       if (st === "done" && !o.showDone) continue
+      const c = Number(cleared[s.key])
+      if (c && at <= c && clearable(st)) continue
       const b = brand(s.agent)
       // how long the current step has gone on
       const since = s.pendingSince ? now - s.pendingSince : quiet
@@ -236,5 +246,5 @@
     ] }
   }
 
-  globalThis.AgentOfficeModel = { TEXT, STATUSES, COLORS, DEFAULTS, HIDE, STUCK_MS, text, fill, hash, brand, state, status, ago, duration, resume, agents, counts, sorted, demo, merge, redact }
+  globalThis.AgentOfficeModel = { TEXT, STATUSES, COLORS, DEFAULTS, HIDE, STUCK_MS, text, fill, hash, brand, state, status, clearable, ago, duration, resume, agents, counts, sorted, demo, merge, redact }
 })()

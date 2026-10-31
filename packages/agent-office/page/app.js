@@ -25,6 +25,7 @@
     hideAfter: M.HIDE[opts.hideAfter] !== undefined ? opts.hideAfter : M.DEFAULTS.hideAfter,
     text: opts.text !== false,
     approvalAfterSec: Number(opts.approvalAfterSec) > 0 ? Number(opts.approvalAfterSec) : M.DEFAULTS.approvalAfterSec,
+    cleared: opts.cleared && typeof opts.cleared === "object" && !Array.isArray(opts.cleared) ? { ...opts.cleared } : {},
   }
   const state = { snap: null, loaded: false, list: [], open: "", hover: "", showText: true }
   let floatHome = null
@@ -230,7 +231,10 @@
     P.copy = el("button", "pc")
     P.copy.type = "button"
     P.copy.addEventListener("click", (e) => { e.stopPropagation(); showCommand(P.copy.dataset.value, P.copy) })
-    foot.append(P.meta, P.copy)
+    P.clear = el("button", "pc pclr")
+    P.clear.type = "button"
+    P.clear.addEventListener("click", (e) => { e.stopPropagation(); clearAgent(state.open) })
+    foot.append(P.meta, P.copy, P.clear)
     P.src = el("div", "psrc")
     panel.replaceChildren(head, P.title, P.status, P.query, P.step, P.err, P.reply, foot, P.src)
   })()
@@ -267,7 +271,26 @@
       P.copy.dataset.label = a.resume ? w.copyResume : w.copySession
       P.copy.textContent = P.copy.dataset.label
     }
+    P.clear.hidden = !M.clearable(a.status)
+    setText(P.clear, w.clear)
+    P.clear.title = w.clearTip
     setText(P.src, a.source === "files" ? w.fromFiles : w.via)
+  }
+
+  // out of the office until its session moves again; kept in the options,
+  // only for sessions live.js still has
+  function clearAgent(key) {
+    const a = state.list.find((x) => x.key === key)
+    if (!a || !M.clearable(a.status)) return
+    const now = Date.now()
+    const known = new Set((snapshot(now)?.sessions || []).map((s) => s?.key))
+    const next = {}
+    for (const [k, at] of Object.entries(view.cleared)) if (known.has(k)) next[k] = at
+    next[key] = a.at
+    view.cleared = next
+    close()
+    refresh()
+    save()
   }
 
   function open(key) {
@@ -408,7 +431,7 @@
   let saved = JSON.stringify(opts)
   const textOn = () => $("optText").checked
   function wanted() {
-    return { ...opts, mode: view.mode, dim: view.dim, demo: view.demo, showDone: view.showDone, hideAfter: view.hideAfter, text: textOn() }
+    return { ...opts, mode: view.mode, dim: view.dim, demo: view.demo, showDone: view.showDone, hideAfter: view.hideAfter, text: textOn(), cleared: view.cleared }
   }
   function save() {
     clearTimeout(saving)
