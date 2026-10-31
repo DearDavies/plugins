@@ -586,7 +586,10 @@ function toUpstreamBody(body, { conversationId, userId }) {
       continue
     }
     if (role === "assistant") {
-      const t = textOf(msg.content).trim()
+      // An earlier reply the agent kept in the envelope's shape goes up as its
+      // answer: sent back as the assistant's own turn, the model took it as
+      // the format to answer in (#564).
+      const t = answerOf(textOf(msg.content)).trim()
       const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : []
       if (t) turns.push({ role: "assistant", content: t })
       if (calls.length) {
@@ -818,7 +821,10 @@ function stripTrailingEnvelope(text) {
       const obj = JSON.parse(tail)
       if (isActionEnvelope(obj) && raw.slice(0, idx).trim()) return raw.slice(0, idx)
     } catch {
-      /* not a whole object from here; try an earlier opening */
+      // not JSON from here: it is still the envelope when its answer was
+      // written with bare line breaks or quotes (#564); else try an earlier
+      // opening
+      if (looseEnvelopeAnswer(tail) !== null && raw.slice(0, idx).trim()) return raw.slice(0, idx)
     }
   }
   return raw
@@ -1097,6 +1103,8 @@ function createAnswerExtractor() {
     if (couldBeEnvelope(raw)) {
       if (!final) return ""
       if (isEnvelope(raw)) return unwrapAnswer(raw)
+      const loose = looseEnvelopeAnswer(raw)
+      if (loose !== null) return loose
       // Preserve the decoded prefix if upstream ended inside the answer string.
       // A closed string followed by prose is an example, so keep it verbatim.
       const start = answerStart(raw)
@@ -1171,6 +1179,71 @@ function isEnvelope(s) {
   }
 }
 
+
+/**
+ * The answer of an envelope that is not JSON, or null when `s` (all of it)
+ * isn't one.
+ *
+ * The assistant writes the envelope itself, and a long Markdown answer comes
+ * with its line breaks written as they are and its quotes left bare (#564):
+ *
+ *   {"action": "completion", "ph_1": "--", "taskCompletion": "## 结论
+ *
+ *   把 "案例模块" 改成…"}
+ *
+ * `JSON.parse` refuses that, and the whole object went out as the reply. The
+ * shape is still unmistakable: it opens with the action key, it carries
+ * `taskCompletion`, and nothing follows its closing brace. So the answer is
+ * everything from the field's opening quote to the last quote before that
+ * brace (after any short fields written after it, such as `"ph_2": "--"`),
+ * with the escapes that are there decoded and everything else kept.
+ */
+function looseEnvelopeAnswer(s) {
+  const t = String(s ?? "")
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim()
+  if (!/^\{\s*"action"\s*:\s*"[A-Za-z_]+"\s*,/i.test(t)) return null
+  const start = answerStart(t)
+  if (start < 0) return null
+  let body = t.slice(start)
+  const close = /\s*\}$/.exec(body)
+  if (!close) return null
+  body = body.slice(0, close.index)
+  const field = /\s*,\s*"[A-Za-z_]\w*"\s*:\s*(?:"[^"\n\\]*"|[-\w.]+)\s*$/
+  for (let m; (m = field.exec(body)); ) body = body.slice(0, m.index)
+  if (!body.endsWith('"')) return null
+  return decodeLooseString(body.slice(0, -1))
+}
+
+/** A JSON string's body as written by hand: escapes decoded, a bare quote or line break kept. */
+function decodeLooseString(s) {
+  let out = ""
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    const next = s[i + 1]
+    if (ch !== "\\" || next === undefined) {
+      out += ch
+      continue
+    }
+    if (next === "u" && /^[0-9a-f]{4}$/i.test(s.slice(i + 2, i + 6))) {
+      out += String.fromCharCode(parseInt(s.slice(i + 2, i + 6), 16))
+      i += 5
+      continue
+    }
+    // an escape JSON doesn't have (a Windows path's `\U`) stays as written
+    out += JSON_ESCAPES[next] ?? ch + next
+    i += 1
+  }
+  return out
+}
+
+/** The answer in a whole reply: the envelope's, or the reply itself when it is prose. */
+function answerOf(text) {
+  const ex = createAnswerExtractor()
+  return ex.push(String(text ?? "")) + ex.finish()
+}
 
 /**
  * Upstream error codes → the status we answer magpie with.
@@ -1389,9 +1462,11 @@ function upstreamToOpenAI(upstreamBody, { model, pacer }) {
         // The error path (skipReasoningFallback) must not — otherwise the error
         // text is pushed out by the thinking, and what the user finally sees is
         // "let me think" instead of "quota used up".
+        // Thinking can be the envelope too (#564): its answer is the text.
         if (!skipReasoningFallback && emitText === 0 && sentReasoning) {
-          push(chunk({ content: sentReasoning }))
-          emitText = sentReasoning.length
+          const text = answerOf(sentReasoning) || sentReasoning
+          push(chunk({ content: text }))
+          emitText = text.length
         }
         closed = true
         push(chunk({}, reason))
@@ -1568,7 +1643,7 @@ async function upstreamToJSON(upstreamBody, { model, pacer }) {
   const visible = extractor.push(content) + extractor.finish()
   // An empty text can't go up blank: the thinking is used first, then a note
   let finalContent = visible.trimEnd()
-  if (!finalContent && reasoning) finalContent = reasoning
+  if (!finalContent && reasoning) finalContent = answerOf(reasoning).trimEnd() || reasoning
   if (!finalContent) finalContent = "(OrcaTerm returned an empty reply)"
   const message = { role: "assistant", content: finalContent }
   if (reasoning) message.reasoning_content = reasoning
@@ -1730,44 +1805,49 @@ export const OrcaTermAuthPlugin = async ({ client } = {}) => {
   }
 
   /**
-   * Each account's own state: conversation ids and temporary settings.
+   * Each account's own state: the user id each session asks as.
    * Keyed by the sign-in fingerprint rather than the provider — with several
    * accounts on magpie, none of them gets in another's way.
    */
   const sessions = new Map()
   /**
-   * Session key = account fingerprint + magpie session id.
-   * Upstream keeps conversations by conversationId, so with the account
-   * fingerprint alone, different chats on one account would share context.
-   * There is a cap as well, so signing in over and over doesn't pile up without
+   * Session key = account fingerprint + magpie session id, for the user id
+   * only. There is a cap, so signing in over and over doesn't pile up without
    * limit.
    *
-   * The conversation id is built the way the web client builds it
-   * (`generateConversationId`, module 72535): `cid-<uuid>` plus `-<assistant>`
-   * for any assistant that isn't lighthouse, plus `-<mode>` for any mode that
-   * isn't RE_ACT. This plugin always asks as orcaterm in RE_ACT, so no mode
-   * suffix.
+   * The conversation id is new on every request (#564). OrcaTerm keeps a
+   * conversation's turns by its id, and this plugin already sends the whole
+   * transcript each time, so an id used twice made upstream put its own copy
+   * of the earlier turns in front: the assistant's output protocol and its
+   * JSON envelopes. And the id was shared more widely than one chat: every
+   * request with no session id fell on "default", and magpie's conversation
+   * id is a hash of the first user turn, so two sessions that open the same
+   * way (or a title request beside its chat) shared one upstream
+   * conversation, and one session's protocol turns ended up at the end of
+   * another's.
+   *
+   * It is built the way the web client builds one (`generateConversationId`,
+   * module 72535): `cid-<uuid>` plus `-<assistant>` for any assistant that
+   * isn't lighthouse, plus `-<mode>` for any mode that isn't RE_ACT. This
+   * plugin always asks as orcaterm in RE_ACT, so no mode suffix.
    */
   const sessionFor = (auth, sid) => {
     const fp = `${fingerprint(auth)}:${sid || "default"}`
-    let s = sessions.get(fp)
-    if (!s) {
+    let userId = sessions.get(fp)
+    if (!userId) {
       if (sessions.size > 64) sessions.clear()
-      s = {
-        conversationId: `cid-${randomUUID()}-${ASSISTANT.orcaterm}`,
-        userId: uid("u-"),
-      }
-      sessions.set(fp, s)
+      userId = uid("u-")
+      sessions.set(fp, userId)
     }
-    return s
+    return { conversationId: `cid-${randomUUID()}-${ASSISTANT.orcaterm}`, userId }
   }
 
   /**
    * There is deliberately no `POST /conversation` here.
    *
    * The web client registers a conversation once and lets upstream keep the
-   * thread. This plugin cannot do the same: magpie hands every request a fresh
-   * session id, so `sessionFor` mints a new conversation id per request, and
+   * thread. This plugin cannot do the same: `sessionFor` mints a new
+   * conversation id per request (#564), and
    * registering each one filled the user's OrcaTerm history with an entry per
    * request — visible to them, and pointless, because the id is never reused.
    *
@@ -2225,16 +2305,11 @@ export const OrcaTermAuthPlugin = async ({ client } = {}) => {
 
     },
 
-    // ---- conversation header: carry magpie's session id to fetch, to split
-    // conversations upstream ---------------------------------------------------
-    // magpie's input.sessionID stays the same across the turns of one
-    // conversation, so conversationId is derived from it: different chats on one
-    // account don't share context.
-    //
-    // When magpie passes no session id — it does not for every caller — the
-    // fallback has to be steady too: a fresh id per request opened a new
-    // conversation upstream every turn and the thread was lost, while the same
-    // turns went through when the plugin was driven directly.
+    // ---- session header: carry magpie's session id to fetch ----------------
+    // It picks the user id a session's requests go up under. It no longer
+    // picks the upstream conversation: that is new on every request, since
+    // the transcript carries the thread (#564). Only this provider's requests
+    // get it; nothing is added to any other provider's.
     "chat.headers": async (input, output) => {
       if (input?.model?.providerID !== PROVIDER) return
       try {
@@ -2274,6 +2349,8 @@ export const _internal = {
   isActionEnvelope,
   appendedEnvelopeAt,
   unwrapAnswer,
+  looseEnvelopeAnswer,
+  answerOf,
   stripTrailingEnvelope,
   createAnswerExtractor,
   csrfCode,

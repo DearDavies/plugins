@@ -230,8 +230,12 @@ The earlier turns are **not** sent as `historyMessages` — they go in as a plai
 `input.input`, and `historyMessages` is always empty. Two reasons, both measured: a history entry's
 kind lives in `type` (`human`/`ai`), not `role`, and the wrong shape fails inside upstream's own
 handler with `[type] is not a function`; and with the right shape the text comes back echoed into the
-answer. A transcript is what the assistant reads reliably — and magpie hands every request a fresh
-session id, so nothing can rely on server-side conversation state anyway.
+answer. A transcript is what the assistant reads reliably.
+
+Every request goes up as a new upstream conversation. OrcaTerm keeps a conversation's turns by its
+id, so an id used twice put upstream's copy of the earlier turns — the assistant's own output format
+and its JSON envelopes — in front of a transcript that already had them, and two sessions that
+shared an id read each other's (#564).
 
 The upstream answers in SSE frames whose `content` is that frame's addition (and whose
 `fullContent`, when present, is everything so far); those become OpenAI deltas, with reasoning kept in
@@ -239,7 +243,10 @@ The upstream answers in SSE frames whose `content` is that frame's addition (and
 
 If a reply starts like the assistant's JSON envelope, its text is held until the reply ends so a
 JSON example followed by more explanation cannot be mistaken for metadata. Plain prose and
-reasoning still stream normally. Leading whitespace and JSON fences are accepted.
+reasoning still stream normally. Leading whitespace and JSON fences are accepted, and so is an
+envelope whose answer has bare line breaks or quotes, which isn't JSON. A reply that comes only as
+thinking, and an earlier reply an agent sends back in the envelope's shape, are read for their
+answer the same way.
 
 Two consequences worth knowing:
 
@@ -281,6 +288,7 @@ bun test
 | `usage.test.mjs` | which `usageStats` row is the AI allowance |
 | `audit.test.mjs` | invalid callback bodies; envelope whitespace and examples; EOF error frames; JSON error codes; reader cleanup; read failures and cancellation |
 | `identity.test.mjs` | stable identity across QR re-sign-ins with rotated tokens or changed nicknames; distinct users staying separate; token user ID fallback; refusing missing identity; renewal and account-scoped backfill preserving credentials and metadata |
+| `leak.test.mjs` | #564: the reported envelope, hand-written envelopes that aren't JSON, an envelope sent as thinking or kept in the history, a new upstream conversation on every request, and nothing added to another provider's request |
 | `review.test.mjs` | the cases the reviews turned up: a reply containing `{"action": …}` is not truncated (including one character at a time, and one that ends mid-envelope); the JSON 429 is a 429; pacers are per account; only nine models are listed; a chat makes exactly one request and it is not `/conversation`; and `/cb` refuses a foreign `Origin`, a rebinding page, and a `state` it did not issue |
 
 `chunks.test.mjs`'s cancel case fails if `releaseUpstream()` is removed, so the leak stays fixed.
@@ -322,8 +330,12 @@ GLM、Kimi。provider id：`orcaterm`。
   插件会先读流头，把配额用完/限流回成 429、登录失效回成 401 并标记账号，这样 magpie 才会换账号
   或让账号歇着，而不是把失败当成一次正常回答。限流还有一条**不走 SSE** 的路径：HTTP 200 +
   `{"code":429,…}` 的 JSON，同样回成 429，并让该账号的限流器进入冷却。
-- **多轮上下文**：magpie 每个请求都给新的 session id，所以服务端会话状态靠不住；之前的轮次以
-  transcript 形式写进 `input.input`，`historyMessages` 恒为空。
+- **多轮上下文**：之前的轮次以 transcript 形式写进 `input.input`，`historyMessages` 恒为空；
+  每个请求在上游都是一个新会话，不复用会话 id —— 复用时上游会把它自己存的旧轮次（助手的输出格式和
+  JSON 信封）再加一遍，两个会话共用一个 id 时还会读到对方的（#564）。
+- **回复信封**：上游回复是助手自己的 JSON 信封（`{"action":"completion","taskCompletion":"…"}`），
+  插件只把 `taskCompletion` 交出去；信封里有未转义的换行或引号、只出现在思考里、或被 agent 当作历史
+  回复再发回来时，也一样只取答案。
 - **不做工具调用、不支持图片**：助手在服务端跑自己的工具，插件只做文本往返。
 
 ## License
