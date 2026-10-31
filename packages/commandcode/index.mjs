@@ -939,6 +939,66 @@ function workPlace(h) {
   return place
 }
 
+// googleSchema is a tool's parameters as Command Code's gateway takes them
+// for a Google model. It converts the schema for Google (Vertex) and
+// refuses a $ref to anything but a direct child of the root's $defs or
+// definitions: 400 AI_UnsupportedFunctionalityError "Google schema
+// conversion only supports references to direct children of root-level
+// $defs or definitions … JSON Schema reference:
+// #/properties/func/properties/triggers/items" (kthink on Discord, dsh on
+// google/gemini-3.8-flash). Such a $ref is written out in place, with the
+// notes beside it kept, and a ref to "#/$defs/x" goes as it came. A ref
+// already being written out above it (a loop) becomes its target's type
+// alone, and so does one 32 deep, so a schema that refers to itself ends.
+// A ref that names nothing is left as it came. Only a Google model gets
+// this; every other model's schema goes as it came.
+const DEF_REF = /^#\/(?:\$defs|definitions)\/[^/]+$/
+const SCHEMA_MAPS = ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"]
+const SCHEMA_ONE = ["items", "additionalProperties", "contains", "propertyNames", "not", "if", "then", "else", "unevaluatedProperties", "unevaluatedItems", "contentSchema", "additionalItems"]
+const SCHEMA_LISTS = ["anyOf", "oneOf", "allOf", "prefixItems"]
+
+const isGoogle = (model) => /^google\/|(?:^|\/)gemini/i.test(String(model ?? ""))
+
+function pointerTarget(root, ref) {
+  if (ref !== "#" && !ref.startsWith("#/")) return undefined
+  let cur = root
+  for (let tok of ref.split("/").slice(1)) {
+    try {
+      tok = decodeURIComponent(tok)
+    } catch {}
+    tok = tok.replaceAll("~1", "/").replaceAll("~0", "~")
+    if (cur === null || typeof cur !== "object" || !Object.hasOwn(cur, tok)) return undefined
+    cur = cur[tok]
+  }
+  return cur
+}
+
+function googleSchema(schema) {
+  if (schema === null || typeof schema !== "object" || !JSON.stringify(schema).includes('"$ref"')) return schema
+  const root = schema
+  const walk = (s, open, depth) => {
+    if (Array.isArray(s)) return s.map((v) => walk(v, open, depth))
+    if (s === null || typeof s !== "object") return s
+    let out = s
+    if (typeof s.$ref === "string" && !(DEF_REF.test(s.$ref) && pointerTarget(root, s.$ref) !== undefined)) {
+      const t = pointerTarget(root, s.$ref)
+      if (t !== null && typeof t === "object" && !Array.isArray(t)) {
+        const { $ref, ...notes } = s
+        if (open.includes($ref) || depth >= 32) return typeof t.type === "string" ? { ...notes, type: t.type } : notes
+        return walk({ ...t, ...notes }, [...open, $ref], depth + 1)
+      }
+    }
+    out = { ...s }
+    for (const k of SCHEMA_MAPS)
+      if (out[k] && typeof out[k] === "object" && !Array.isArray(out[k]))
+        out[k] = Object.fromEntries(Object.entries(out[k]).map(([n, v]) => [n, walk(v, open, depth)]))
+    for (const k of SCHEMA_ONE) if (out[k] && typeof out[k] === "object") out[k] = walk(out[k], open, depth)
+    for (const k of SCHEMA_LISTS) if (Array.isArray(out[k])) out[k] = out[k].map((v) => walk(v, open, depth))
+    return out
+  }
+  return walk(schema, [], 0)
+}
+
 // generateBody is a chat completion request as the CLI asks
 // /alpha/generate, with no structure, branch or status behind it. The
 // working directory and whether it is a git repository are the agent's as
@@ -996,12 +1056,13 @@ function generateBody(chat, place = {}) {
     if (parts.length) messages.push({ role: "user", content: parts })
   }
   flush()
+  const google = isGoogle(chat.model)
   const tools = (chat.tools ?? [])
     .filter((t) => t?.type === "function" && t.function?.name)
     .map((t) => ({
       name: t.function.name,
       description: t.function.description ?? "",
-      input_schema: t.function.parameters ?? { type: "object", properties: {} },
+      input_schema: google ? googleSchema(t.function.parameters ?? { type: "object", properties: {} }) : t.function.parameters ?? { type: "object", properties: {} },
     }))
   const params = {
     model: chat.model,
@@ -1339,14 +1400,30 @@ async function generate(key, chat, signal, place, zdr = false) {
 // providerBody is the chat completion chat as the Provider API is sent it,
 // or undefined when it goes as it came: off, magpie's none or a client's
 // "off", is "off" for a model that turns thinking off (THINK_OFF), and
-// left out for any other, which refuses both "none" and "off" (#334).
+// left out for any other, which refuses both "none" and "off" (#334). A
+// Google model's tools have the $refs Google can't take written out
+// (googleSchema).
 function providerBody(chat) {
+  let out = chat
   const e = chat?.reasoning_effort
-  if (e !== "none" && e !== "off") return undefined
-  const out = { ...chat }
-  if (THINK_OFF.has(chat.model)) out.reasoning_effort = "off"
-  else delete out.reasoning_effort
-  return e === out.reasoning_effort ? undefined : JSON.stringify(out)
+  if (e === "none" || e === "off") {
+    out = { ...chat }
+    if (THINK_OFF.has(chat.model)) out.reasoning_effort = "off"
+    else delete out.reasoning_effort
+    if (e === out.reasoning_effort) out = chat
+  }
+  if (isGoogle(chat?.model) && Array.isArray(chat.tools)) {
+    let changed = false
+    const tools = chat.tools.map((t) => {
+      const p = t?.function?.parameters
+      const g = googleSchema(p)
+      if (g === p) return t
+      changed = true
+      return { ...t, function: { ...t.function, parameters: g } }
+    })
+    if (changed) out = { ...out, tools }
+  }
+  return out === chat ? undefined : JSON.stringify(out)
 }
 
 // systemOne asks Command Code's System One as the CLI asks it: the
@@ -1376,7 +1453,7 @@ async function systemOne(key, init, input, place, zdr) {
 
 // ---- the plugin ---------------------------------------------------------------
 
-export const _internal = { JEV, projectSlug, subsSeen, extraSeen, waits, liveKey, failure, goModels, refuses, GO_MODELS, GO_REFUSED, zdrOn }
+export const _internal = { googleSchema, isGoogle, JEV, projectSlug, subsSeen, extraSeen, waits, liveKey, failure, goModels, refuses, GO_MODELS, GO_REFUSED, zdrOn }
 
 export async function CommandCodePlugin({ client, magpie } = {}) {
   // isGo keeps a key as Go's, for its models and endpoint: in the
