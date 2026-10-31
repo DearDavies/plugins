@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 · 2026-10-31
+
+### Fixed
+
+- Initial and reset scans no longer pass every fragment of a complete image-heavy record through the character framer; only fragments of the record still unfinished at EOF are framed, once (#559).
+- Regressions for identical-witness inode replacement, invalidated committed EOF records, exact Codex-title append reads and unchanged summary caching (#559).
+
 ## 0.2.0 · 2026-10-31
 
 功能对齐 [whatsmyagentdoing](https://github.com/Charonyuu/whatsmyagentdoing)，并加入真正的 3D 与独立运行方式。
@@ -21,8 +28,6 @@
 
 ### Fixed
 
-- Follow-up after PR #551 approval/merge: skip per-character framing for complete image-heavy records during initial/reset scans; frame only new fragments of the unfinished EOF record.
-- Cover identical-witness inode replacement, invalidated committed EOF records, exact Codex-title append reads and unchanged summary caching with independently mutation-checked regressions.
 - Narrow the CSP compatibility note to the reproduced Mac Playwright/WebKit build and add a local diagnostic; Linux build 2336 did not reproduce the refusal.
 
 - Secure the standalone server with per-run capability URLs, validated Host and same-origin JSON writes; reject cross-site data/script access.
