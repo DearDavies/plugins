@@ -1479,6 +1479,22 @@ const eventName = (s) =>
 // Claude (whether prompt_tokens counts them too is judged there, by
 // whether it is at least as big); without them every request read as no
 // cache hit (01huadalang on magpie's Discord: K3, 53 calls, all 0)
+//
+// A count that names no cache at all — Trae's token_usage as
+// {"prompt_tokens":1717,"completion_tokens":2,"total_tokens":1719}, a shape
+// plugins#455 captured from Trae — says magpie_cache_unknown, as the Kiro
+// plugin does: Trae didn't say what its cache read, so magpie shows no hit
+// rate rather than a 0% Trae never gave. Before, it and a count of 0 both
+// went on with no cache field, which magpie can only read as a miss, so
+// since 10-28 every chat showed 0 (yetone/magpie#3979, #3991; plugins#434
+// says Trae stopped sending cache_read_input_tokens then). A count naming
+// the cache, a 0 included, is Trae's own word and goes as before.
+// DeepSeek's prompt_cache_hit_tokens, a bare cached_tokens and the
+// Responses-style input_tokens_details are read too, the largest of them,
+// should Trae pass a model's own usage on.
+const CACHE_NAMED = ["cache_read_input_tokens", "cacheReadInputTokens", "cache_creation_input_tokens", "cacheCreationInputTokens", "prompt_cache_hit_tokens", "cached_tokens"]
+const namesCache = (u) =>
+  CACHE_NAMED.some((k) => u[k] != null) || u.prompt_tokens_details?.cached_tokens != null || u.input_tokens_details?.cached_tokens != null
 function tokensOf(u) {
   if (!u || typeof u !== "object") return null
   const n = (...v) => Number(v.find((x) => x != null) ?? 0) || 0
@@ -1486,9 +1502,10 @@ function tokensOf(u) {
   const c = n(u.completion_tokens, u.output_tokens, u.completionTokens, u.outputTokens)
   if (!p && !c) return null
   const out = { prompt_tokens: p, completion_tokens: c, total_tokens: n(u.total_tokens, u.totalTokens) || p + c }
-  const read = n(u.prompt_tokens_details?.cached_tokens)
+  const read = Math.max(...[u.prompt_tokens_details?.cached_tokens, u.input_tokens_details?.cached_tokens, u.prompt_cache_hit_tokens, u.cached_tokens].map((x) => Number(x) || 0))
   const write = n(u.prompt_tokens_details?.cache_write_tokens)
   if (read || write) out.prompt_tokens_details = { cached_tokens: read, ...(write ? { cache_write_tokens: write } : {}) }
+  else if (!namesCache(u)) out.magpie_cache_unknown = true
   else {
     const r = n(u.cache_read_input_tokens, u.cacheReadInputTokens)
     const w = n(u.cache_creation_input_tokens, u.cacheCreationInputTokens)

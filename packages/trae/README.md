@@ -113,7 +113,11 @@ agent's `POST https://trae-api-cn.mchost.guru/api/agent/v3/llm_utils_chat`:
     What `token_usage` says the prompt cache read and wrote
     (`cache_read_input_tokens`, `cache_creation_input_tokens`) goes on under
     those names, and `reasoning_tokens` as
-    `completion_tokens_details.reasoning_tokens`.
+    `completion_tokens_details.reasoning_tokens`. DeepSeek's
+    `prompt_cache_hit_tokens` and `cached_tokens` are read as cache reads
+    too. A `token_usage` that names no cache count at all goes on with
+    `magpie_cache_unknown: true`, so magpie shows the cache as unknown,
+    not as a 0% miss (0.2.26).
     `done`'s `finish_reason` `length`/`max_tokens` is OpenAI's `length`.
   - Queue events are ignored.
   - A `{"reasoning_content": …}` object written into the text is reasoning,

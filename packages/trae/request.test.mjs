@@ -196,7 +196,7 @@ test("a stream: text, reasoning, a tool block split across events, a native call
   expect(calls.map((t) => [t.index, t.function.name, t.function.arguments])).toEqual([[0, "read", '{"path":"a"}'], [1, "read", '{"path":"b"}']])
   expect(calls[1].id).toBe("n1")
   expect(c.at(-3).choices[0].finish_reason).toBe("tool_calls")
-  expect(c.at(-2).usage).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 })
+  expect(c.at(-2).usage).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15, magpie_cache_unknown: true })
   expect(c.at(-1)).toBe("[DONE]")
 })
 

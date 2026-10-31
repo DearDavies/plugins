@@ -96,3 +96,35 @@ for (const stream of [true, false]) {
     })
   })
 }
+
+// yetone/magpie#3979, #3991 (ferock): every Trae CN call showed cache 0.
+// A token_usage that names no cache at all — Trae's own bytes, as
+// plugins#455 captured one — is told to magpie as unknown
+// (magpie_cache_unknown), so it shows no hit rate, not a 0% Trae never
+// said; a counted 0 above stays a miss.
+const UNCOUNTED = 'event: token_usage\ndata: {"prompt_tokens":1717,"completion_tokens":2,"total_tokens":1719}\n\n'
+
+for (const stream of [true, false]) {
+  test(`a token_usage that names no cache says the cache is unknown (#3991, stream=${stream})`, async () => {
+    f = fakeTrae()
+    f.route(
+      "POST /api/agent/v3/llm_utils_chat",
+      () =>
+        new Response('event: output\ndata: {"response":"[]"}\n\n' + UNCOUNTED + 'event: done\ndata: {"done_with":"end","message":"success"}\n\n', {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    )
+    const res = await ask({ model: "glm-5", stream, messages: [{ role: "user", content: "hi" }] })
+    const usage = stream
+      ? (await res.text()).split("\n").filter((l) => l.startsWith("data: {")).map((l) => JSON.parse(l.slice(6))).at(-1).usage
+      : (await res.json()).usage
+    expect(usage).toEqual({ prompt_tokens: 1717, completion_tokens: 2, total_tokens: 1719, magpie_cache_unknown: true })
+  })
+}
+
+test("DeepSeek's own prompt_cache_hit_tokens is read as the cache read", async () => {
+  f = fakeTrae()
+  f.route("POST /api/agent/v3/llm_utils_chat", () => sse([["output", { response: "ok" }], ["token_usage", { prompt_tokens: 3000, completion_tokens: 2, prompt_cache_hit_tokens: 2048, prompt_cache_miss_tokens: 952 }], ["done", {}]]))
+  const res = await ask({ model: "glm-5", messages: [{ role: "user", content: "hi" }] })
+  expect((await res.json()).usage).toEqual({ prompt_tokens: 3000, completion_tokens: 2, total_tokens: 3002, prompt_tokens_details: { cached_tokens: 2048 } })
+})
