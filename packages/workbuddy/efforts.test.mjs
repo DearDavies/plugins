@@ -24,7 +24,7 @@ test("a model that says only supportsReasoning and a default takes low, high, ma
   expect(e["kimi-k3"]).toEqual(["low", "medium", "high", "max"])
   expect(e["gemini-3.5-flash"]).toEqual(["low", "medium", "high", "max"])
   expect(e["primary-model"]).toEqual(["low", "high", "max"])
-  expect(e["deepseek-v4.1-flash-sg"]).toEqual(["low", "high", "max"])
+  expect(e["deepseek-v4.1-flash-sg"]).toEqual(["none", "low", "high", "max"]) // it takes none (plugins#563)
 })
 
 test("listed efforts are kept as they are, and a model that doesn't reason gets none", async () => {

@@ -28,7 +28,7 @@ const CN_MODELS = [
   ["hy4-preview-f", "Hy4 preview", 1000000, ["high"]],
   ["hy3", "Hy3", 192000, ["low", "high"]],
   ["hy3-x", "Hy3-X", 192000, ["low", "high"]],
-  ["deepseek-v4.1-flash", "Deepseek-V4.1-Flash", 1000000],
+  ["deepseek-v4.1-flash", "Deepseek-V4.1-Flash", 1000000, ["none", "low", "high", "max"]],
   ["glm-5.3", "GLM-5.3", 1000000, ["low", "high", "max"]],
   ["glm-5.3-flash", "GLM-5.3-Flash", 1000000, ["low", "high", "max"]],
   ["glm-5.2", "GLM-5.2", 1000000, ["high", "xhigh"]],
@@ -81,6 +81,9 @@ const SITES = {
     // where this build's API keys are made (see keyAccount)
     keys: "https://www.workbuddy.cn/profile/keys",
     models: CN_MODELS,
+    // the prompt a model takes here, where it is less than the config's
+    // maxInputTokens (see contextOf)
+    contextCap: { "deepseek-v4.1-flash": 100000 },
     // it serves the Claude models on Anthropic's Messages API too (see
     // nativeOf)
     messages: true,
@@ -108,6 +111,33 @@ const SITES = {
     noImages: /^glm-/,
   },
 }
+
+// contextOf is the prompt site takes for model: the config's
+// maxInputTokens, or less where the site turns a longer prompt away.
+// copilot.tencent.com's /v3/config gives deepseek-v4.1-flash 1000000, but
+// its chat answers a prompt over 100000 tokens with 400 "prompt is too long:
+// 100001 tokens > 100000 maximum" (plugins#561: 11 times on two accounts;
+// the largest prompt it took was 76,065), while glm-5.3-flash on the same
+// endpoint took 954,019. A client planning against 1M grows its thread
+// past 100k and then can't compact it either, as the compaction resends it
+// whole. WorkBuddy AI is not capped so: www.workbuddy.ai's
+// deepseek-v4.1-flash took a 181,887-token prompt (measured 2026-10-31),
+// so only the China build has the cap.
+function contextOf(site, model, said) {
+  const cap = site.contextCap?.[model]
+  if (!cap) return said
+  return typeof said === "number" && said > 0 ? Math.min(said, cap) : cap
+}
+
+// OFF_TAKEN are models that turn thinking off for reasoning_effort "none"
+// though the config says onlyReasoning (so WorkBuddy's own client offers no
+// off switch): deepseek-v4.1-flash, and the same model under its paid id.
+// Measured 2026-10-31 on www.workbuddy.ai: "none" answered 200 with 0
+// reasoning tokens on both, where "low" thought 1221 and 1127; and on the
+// China build by the reporter of plugins#563 (0 reasoning tokens, a 30-item
+// prompt in 14s instead of 50s). Without the level magpie sends "low" for
+// a client's "none".
+const OFF_TAKEN = new Set(["deepseek-v4.1-flash", "deepseek-v4.1-flash-sg"])
 
 // textOnly says whether site drops the images sent to model, whatever its
 // config says. On 2026-10-13, with a real WorkBuddy AI account (Yirasumi on
@@ -2930,7 +2960,7 @@ function variants(efforts) {
 function configModels(site) {
   return Object.fromEntries(site.models.map(([id, name, context, efforts]) => [id, {
     name,
-    limit: { context, output: 0 },
+    limit: { context: contextOf(site, id, context), output: 0 },
     tool_call: true,
     // OpenCode (and magpie's host) read a config model's package and URL
     // from provider: { npm, api }, not api
@@ -3125,14 +3155,15 @@ async function liveModels(site, a) {
       const d = (cfg.models ?? []).find((x) => x.id === id)
       const m = { id, name: d?.name || id }
       if (d) {
-        m.context = d.maxInputTokens
+        m.context = contextOf(site, id, d.maxInputTokens)
         m.output = d.maxOutputTokens
         m.images = d.supportsImages === true && !textOnly(site, id)
         Object.assign(m, priceOf(d, cfg.modelPromotions))
         const es = effortsOf(d, site, id)
         if (es.length) {
           const canOff = d.reasoning?.canDisableThinking
-          m.efforts = [...(!d.onlyReasoning && (canOff == null || canOff) ? ["none"] : []), ...es]
+          const off = (!d.onlyReasoning && (canOff == null || canOff)) || OFF_TAKEN.has(id)
+          m.efforts = [...(off ? ["none"] : []), ...es]
           const def = defaultEffortOf(d, es)
           if (def) m.effort = def
         }
@@ -3759,4 +3790,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { idFor, replyAfterToolsOn, withDefaultEffort, defaultEffortOf, gzipped, FREE_ONLY, PRICE_TTL, keyAccount, remoteConfig, cycleOf, typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, accountName, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, asReasoning, normalizeToolChoice, fitTools, fitted, renamed, unsaid, FILTER_SAYS, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, REFUSED_DOC, commaPaused, commaPausedOn, opened, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, scopeOf, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, prepared, answeredBefore, nativeOf, modelOf, configModels, freeWindowOf, tokensShort, freeWindowRows, freeWindowLedger, readLedgerTail, pinned, rowTime, rowAccount, ofAccount, windowOffset, windowReset, FREE_WINDOW_MODELS, FREE_WINDOW_SPAN, FREE_WINDOW_GAP, FREE_WINDOW_LEAD, checkinOf, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }
+export const _internal = { idFor, contextOf, OFF_TAKEN, replyAfterToolsOn, withDefaultEffort, defaultEffortOf, gzipped, FREE_ONLY, PRICE_TTL, keyAccount, remoteConfig, cycleOf, typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, accountName, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, asReasoning, normalizeToolChoice, fitTools, fitted, renamed, unsaid, FILTER_SAYS, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, REFUSED_DOC, commaPaused, commaPausedOn, opened, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, scopeOf, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, prepared, answeredBefore, nativeOf, modelOf, configModels, freeWindowOf, tokensShort, freeWindowRows, freeWindowLedger, readLedgerTail, pinned, rowTime, rowAccount, ofAccount, windowOffset, windowReset, FREE_WINDOW_MODELS, FREE_WINDOW_SPAN, FREE_WINDOW_GAP, FREE_WINDOW_LEAD, checkinOf, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }

@@ -1,0 +1,252 @@
+{
+ "workbuddy": {
+  "code": 0,
+  "msg": "OK",
+  "data": {
+   "agents": [
+    {
+     "name": "cli",
+     "models": [
+      "deepseek-v4.1-flash",
+      "glm-5.3-flash",
+      "deepseek-v4-pro"
+     ]
+    }
+   ],
+   "models": [
+    {
+     "contextWindow": {
+      "defaultLength": 300000,
+      "supportedLengths": [
+       300000,
+       600000,
+       1000000
+      ]
+     },
+     "credits": "x0.08",
+     "id": "glm-5.3-flash",
+     "maxAllowedSize": 1000000,
+     "maxInputTokens": 1000000,
+     "maxOutputTokens": 131072,
+     "name": "GLM-5.3-Flash",
+     "onlyReasoning": true,
+     "reasoning": {
+      "canDisableThinking": false,
+      "defaultEffort": "high",
+      "summary": "auto",
+      "supportedEfforts": [
+       "low",
+       "high",
+       "max"
+      ]
+     },
+     "relatedModels": {
+      "builtin-lite": "wb-lite",
+      "lite": "glm-5.3-flash",
+      "reasoning": "glm-5.3-flash"
+     },
+     "supportsImages": true,
+     "supportsReasoning": true,
+     "supportsToolCall": true,
+     "temperature": 1,
+     "vendor": "f"
+    },
+    {
+     "contextWindow": {
+      "defaultLength": 300000,
+      "supportedLengths": [
+       300000,
+       600000,
+       1000000
+      ]
+     },
+     "credits": "x0.11",
+     "id": "deepseek-v4.1-flash",
+     "maxAllowedSize": 1000000,
+     "maxInputTokens": 1000000,
+     "maxOutputTokens": 128000,
+     "name": "DeepSeek-V4.1-Flash",
+     "onlyReasoning": true,
+     "reasoning": {
+      "canDisableThinking": true,
+      "defaultEffort": "high",
+      "summary": "auto",
+      "supportedEfforts": [
+       "low",
+       "high",
+       "max"
+      ]
+     },
+     "relatedModels": {
+      "builtin-lite": "wb-lite",
+      "lite": "deepseek-v4.1-flash",
+      "reasoning": "deepseek-v4.1-flash"
+     },
+     "supportsImages": true,
+     "supportsReasoning": true,
+     "supportsToolCall": true,
+     "temperature": 1,
+     "vendor": "f"
+    },
+    {
+     "contextWindow": {
+      "defaultLength": 300000,
+      "supportedLengths": [
+       300000,
+       600000,
+       1000000
+      ]
+     },
+     "credits": "x0.51",
+     "id": "deepseek-v4-pro",
+     "maxAllowedSize": 1000000,
+     "maxInputTokens": 1000000,
+     "maxOutputTokens": 128000,
+     "name": "DeepSeek-V4-Pro",
+     "onlyReasoning": false,
+     "reasoning": {
+      "canDisableThinking": true,
+      "defaultEffort": "high",
+      "summary": "auto",
+      "supportedEfforts": [
+       "high",
+       "xhigh"
+      ]
+     },
+     "relatedModels": {
+      "builtin-lite": "wb-lite",
+      "lite": "deepseek-v4-pro",
+      "reasoning": "deepseek-v4-pro"
+     },
+     "supportsImages": true,
+     "supportsReasoning": true,
+     "supportsToolCall": true,
+     "temperature": 1,
+     "vendor": "f"
+    }
+   ]
+  }
+ },
+ "workbuddy-ai": {
+  "code": 0,
+  "msg": "OK",
+  "data": {
+   "agents": [
+    {
+     "name": "cli",
+     "models": [
+      "deepseek-v4.1-flash",
+      "deepseek-v4.1-flash-sg",
+      "glm-5.3-flash"
+     ]
+    }
+   ],
+   "models": [
+    {
+     "contextWindow": {
+      "defaultLength": 300000,
+      "supportedLengths": [
+       300000,
+       1000000
+      ]
+     },
+     "credits": "x0.00",
+     "id": "deepseek-v4.1-flash",
+     "maxAllowedSize": 1000000,
+     "maxInputTokens": 1000000,
+     "maxOutputTokens": 128000,
+     "name": "Deepseek-V4.1-Flash",
+     "onlyReasoning": true,
+     "reasoning": {
+      "defaultEffort": "high",
+      "summary": "auto",
+      "supportedEfforts": [
+       "low",
+       "high",
+       "max"
+      ]
+     },
+     "relatedModels": {
+      "lite": "deepseek-v4.1-flash",
+      "reasoning": "deepseek-v4.1-flash"
+     },
+     "supportsImages": true,
+     "supportsReasoning": true,
+     "supportsToolCall": true,
+     "temperature": 1,
+     "vendor": "f"
+    },
+    {
+     "contextWindow": {
+      "defaultLength": 300000,
+      "supportedLengths": [
+       300000,
+       1000000
+      ]
+     },
+     "credits": "x0.03",
+     "id": "deepseek-v4.1-flash-sg",
+     "maxAllowedSize": 1000000,
+     "maxInputTokens": 1000000,
+     "maxOutputTokens": 128000,
+     "name": "Deepseek-V4.1-Flash",
+     "onlyReasoning": true,
+     "reasoning": {
+      "defaultEffort": "high",
+      "summary": "auto",
+      "supportedEfforts": [
+       "low",
+       "high",
+       "max"
+      ]
+     },
+     "relatedModels": {
+      "lite": "deepseek-v4.1-flash-sg",
+      "reasoning": "deepseek-v4.1-flash-sg"
+     },
+     "supportsImages": true,
+     "supportsReasoning": true,
+     "supportsToolCall": true,
+     "temperature": 1,
+     "vendor": "f"
+    },
+    {
+     "contextWindow": {
+      "defaultLength": 300000,
+      "supportedLengths": [
+       300000,
+       1000000
+      ]
+     },
+     "credits": "x0.08",
+     "id": "glm-5.3-flash",
+     "maxAllowedSize": 1000000,
+     "maxInputTokens": 1000000,
+     "maxOutputTokens": 32000,
+     "name": "GLM-5.3-Flash",
+     "onlyReasoning": true,
+     "reasoning": {
+      "canDisableThinking": true,
+      "defaultEffort": "high",
+      "summary": "auto",
+      "supportedEfforts": [
+       "low",
+       "high",
+       "max"
+      ]
+     },
+     "relatedModels": {
+      "builtin-lite": "wb-lite",
+      "lite": "glm-5.3-flash",
+      "reasoning": "glm-5.3-flash"
+     },
+     "supportsImages": true,
+     "supportsReasoning": true,
+     "supportsToolCall": true,
+     "temperature": 1,
+     "vendor": "f"
+    }
+   ]
+  }
+ }
+}
