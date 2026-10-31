@@ -286,16 +286,17 @@ client sends it: WorkBuddy doesn't think when a chat names none, so
 OpenCode's default variant got answers without thinking. An effort the
 client names, `none` too, goes as it came.
 
-Two values differ from the config, each measured with real requests:
+One value differs from the config, measured with real requests:
+DeepSeek-V4.1-Flash (and its paid `-sg` id) lists `none`, though the
+config says it only reasons: WorkBuddy answers `reasoning_effort: "none"`
+on it with no thinking at all (since 0.2.7, #563).
 
-- DeepSeek-V4.1-Flash (and its paid `-sg` id) lists `none`, though the
-  config says it only reasons: WorkBuddy answers `reasoning_effort: "none"`
-  on it with no thinking at all (since 0.2.7, #563).
-- On `workbuddy` (copilot.tencent.com), DeepSeek-V4.1-Flash's context is
-  100000, not the config's 1000000: a longer prompt is refused with
-  "prompt is too long: … > 100000 maximum", while GLM-5.3-Flash on the same
-  endpoint takes the million. `workbuddy-ai` takes the million on it
-  (since 0.2.7, #561).
+A model's context is the config's `maxInputTokens` on both sites. 0.2.7
+capped DeepSeek-V4.1-Flash at 100000 on `workbuddy` (copilot.tencent.com)
+from one report's error; China accounts took prompts up to 992,389 tokens
+on it, so 0.2.8 lifted the cap (#561). A prompt WorkBuddy does find too
+long ("prompt is too long: … > … maximum") is answered with its own 400,
+passed on as it came, which magpie takes as the context overflowing.
 
 A chat goes gzipped (`Content-Encoding: gzip`), as WorkBuddy's own client
 sends its model requests (`RequestBodyGzip` in both builds' product.json).

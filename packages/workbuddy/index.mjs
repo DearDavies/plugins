@@ -81,9 +81,6 @@ const SITES = {
     // where this build's API keys are made (see keyAccount)
     keys: "https://www.workbuddy.cn/profile/keys",
     models: CN_MODELS,
-    // the prompt a model takes here, where it is less than the config's
-    // maxInputTokens (see contextOf)
-    contextCap: { "deepseek-v4.1-flash": 100000 },
     // it serves the Claude models on Anthropic's Messages API too (see
     // nativeOf)
     messages: true,
@@ -112,22 +109,17 @@ const SITES = {
   },
 }
 
-// contextOf is the prompt site takes for model: the config's
-// maxInputTokens, or less where the site turns a longer prompt away.
-// copilot.tencent.com's /v3/config gives deepseek-v4.1-flash 1000000, but
-// its chat answers a prompt over 100000 tokens with 400 "prompt is too long:
-// 100001 tokens > 100000 maximum" (plugins#561: 11 times on two accounts;
-// the largest prompt it took was 76,065), while glm-5.3-flash on the same
-// endpoint took 954,019. A client planning against 1M grows its thread
-// past 100k and then can't compact it either, as the compaction resends it
-// whole. WorkBuddy AI is not capped so: www.workbuddy.ai's
-// deepseek-v4.1-flash took a 181,887-token prompt (measured 2026-10-31),
-// so only the China build has the cap.
-function contextOf(site, model, said) {
-  const cap = site.contextCap?.[model]
-  if (!cap) return said
-  return typeof said === "number" && said > 0 ? Math.min(said, cap) : cap
-}
+// A model's context is its config's maxInputTokens, on both sites. 0.2.7
+// capped deepseek-v4.1-flash at 100000 on copilot.tencent.com from one
+// report's error ("prompt is too long: 100001 tokens > 100000 maximum"),
+// and it was wrong: on 2026-10-31 China Free-plan accounts of three other
+// users took 110,041 to 992,389-token prompts on it there, the whole prompt
+// read (needles recalled), and the vendor's own refusal of 1,157,831 named
+// 1048576 as the maximum (plugins#561). The cap made every client compact at
+// 100k. Where a prompt really is too long, WorkBuddy's 400 says "prompt is
+// too long" and goes to the client as it came (explained), which magpie
+// reads as the context overflowing (context_length_exceeded): the agent is
+// told to compact, and the account isn't rested for it.
 
 // OFF_TAKEN are models that turn thinking off for reasoning_effort "none"
 // though the config says onlyReasoning (so WorkBuddy's own client offers no
@@ -2960,7 +2952,7 @@ function variants(efforts) {
 function configModels(site) {
   return Object.fromEntries(site.models.map(([id, name, context, efforts]) => [id, {
     name,
-    limit: { context: contextOf(site, id, context), output: 0 },
+    limit: { context, output: 0 },
     tool_call: true,
     // OpenCode (and magpie's host) read a config model's package and URL
     // from provider: { npm, api }, not api
@@ -3155,7 +3147,7 @@ async function liveModels(site, a) {
       const d = (cfg.models ?? []).find((x) => x.id === id)
       const m = { id, name: d?.name || id }
       if (d) {
-        m.context = contextOf(site, id, d.maxInputTokens)
+        m.context = d.maxInputTokens
         m.output = d.maxOutputTokens
         m.images = d.supportsImages === true && !textOnly(site, id)
         Object.assign(m, priceOf(d, cfg.modelPromotions))
@@ -3790,4 +3782,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { idFor, contextOf, OFF_TAKEN, replyAfterToolsOn, withDefaultEffort, defaultEffortOf, gzipped, FREE_ONLY, PRICE_TTL, keyAccount, remoteConfig, cycleOf, typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, accountName, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, asReasoning, normalizeToolChoice, fitTools, fitted, renamed, unsaid, FILTER_SAYS, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, REFUSED_DOC, commaPaused, commaPausedOn, opened, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, scopeOf, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, prepared, answeredBefore, nativeOf, modelOf, configModels, freeWindowOf, tokensShort, freeWindowRows, freeWindowLedger, readLedgerTail, pinned, rowTime, rowAccount, ofAccount, windowOffset, windowReset, FREE_WINDOW_MODELS, FREE_WINDOW_SPAN, FREE_WINDOW_GAP, FREE_WINDOW_LEAD, checkinOf, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }
+export const _internal = { idFor, OFF_TAKEN, replyAfterToolsOn, withDefaultEffort, defaultEffortOf, gzipped, FREE_ONLY, PRICE_TTL, keyAccount, remoteConfig, cycleOf, typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, accountName, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, asReasoning, normalizeToolChoice, fitTools, fitted, renamed, unsaid, FILTER_SAYS, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, REFUSED_DOC, commaPaused, commaPausedOn, opened, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, scopeOf, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, prepared, answeredBefore, nativeOf, modelOf, configModels, freeWindowOf, tokensShort, freeWindowRows, freeWindowLedger, readLedgerTail, pinned, rowTime, rowAccount, ofAccount, windowOffset, windowReset, FREE_WINDOW_MODELS, FREE_WINDOW_SPAN, FREE_WINDOW_GAP, FREE_WINDOW_LEAD, checkinOf, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }
