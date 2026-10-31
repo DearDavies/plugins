@@ -566,7 +566,7 @@ var DRAFT_ID = "__draft__";
 var state = {
   boot: null,
   settings: {
-    model: "", effort: "", system: "", instructions: [], skills: [], mcp: [],
+    model: "", effort: "", system: "", instructions: [], skills: [], mcp: [], mcpAll: false,
     temperature: 0.7, maxTokens: 0, showReasoning: true
   },
   models: [],
@@ -765,6 +765,7 @@ function applySettings(raw) {
     instructions: Array.isArray(s.instructions) ? s.instructions.slice() : [],
     skills: Array.isArray(s.skills) ? s.skills.slice() : [],
     mcp: Array.isArray(s.mcp) ? s.mcp.slice() : [],
+    mcpAll: s.mcpAll === true,
     temperature: isFinite(Number(s.temperature)) ? Number(s.temperature) : 0.7,
     maxTokens: isFinite(Number(s.maxTokens)) ? Number(s.maxTokens) : 0,
     showReasoning: s.showReasoning !== false,
@@ -806,6 +807,7 @@ function renderPills() {
     || (s.instructions || []).length > 0
     || (s.skills || []).length > 0
     || (s.mcp || []).length > 0
+    || s.mcpAll === true
     || Number(s.temperature) !== 0.7
     || Number(s.maxTokens) > 0
     || s.showReasoning === false;
@@ -1243,12 +1245,20 @@ function renderSettings() {
   renderSetList("#skillList", state.library.skills || [], "skills", function (item) {
     return { key: item.name, name: item.name, extra: "" };
   });
+  var all = state.settings.mcpAll === true;
+  $("#mcpAll").setAttribute("aria-checked", all ? "true" : "false");
   renderSetList("#mcpList", state.library.mcp || [], "mcp", function (item) {
     return { key: item.name, name: item.name, extra: item.transport || "" };
-  });
+  }, all);
 }
 
-function renderSetList(sel, items, field, pick) {
+/* 这一轮要不要带工具：开了「全部」，或者勾了至少一个服务器 */
+function wantsTools(settings) {
+  return settings.mcpAll === true || (settings.mcp || []).length > 0;
+}
+
+// allOn：列表由上面的总开关接管，每一项都显示为勾上、点不动
+function renderSetList(sel, items, field, pick, allOn) {
   var box = $(sel);
   while (box.firstChild) box.removeChild(box.firstChild);
   if (!items.length) {
@@ -1258,14 +1268,20 @@ function renderSetList(sel, items, field, pick) {
   var selected = state.settings[field] || [];
   items.forEach(function (item) {
     var info = pick(item);
-    var on = selected.indexOf(info.key) >= 0;
+    var on = allOn === true || selected.indexOf(info.key) >= 0;
     var tick = el("span", { class: "tick" + (on ? " on" : ""), text: "\u2713" });
     var row = el("button", { class: "set-item", type: "button", role: "checkbox", "aria-checked": on ? "true" : "false", title: info.name },
       tick,
       el("span", { class: "set-name", text: info.name }),
       info.extra ? el("span", { class: "set-extra", text: info.extra }) : null
     );
-    row.addEventListener("click", function () { toggleItem(field, info.key); });
+    if (allOn === true) {
+      row.disabled = true;
+      row.setAttribute("aria-disabled", "true");
+      row.title = info.name + "（已用全部 MCP 服务器）";
+    } else {
+      row.addEventListener("click", function () { toggleItem(field, info.key); });
+    }
     box.appendChild(row);
   });
 }
@@ -2188,13 +2204,15 @@ function send() {
     system: state.settings.systemEnabled === false ? "" : (state.settings.system || ""),
     temperature: Number(state.settings.temperature),
     maxTokens: Number(state.settings.maxTokens) || 0,
-    useTools: (state.settings.mcp || []).length > 0,
+    useTools: wantsTools(state.settings),
     clientId: state.clientId
   };
   var started = Date.now();
   forageBegin(refs); // 开始计时：从按下发送到这一轮结束，显示在这条回复的底部
 
-  streamChat(payload, function (evt) { handleEvent(evt, refs); }, state.abort.signal)
+  // 服务端按存下来的设置挑 MCP 服务器：刚拨的开关还在 320ms 的防抖里没存，先存了再发
+  var saved = saveTimer ? flushSettings() : Promise.resolve();
+  saved.then(function () { return streamChat(payload, function (evt) { handleEvent(evt, refs); }, state.abort.signal); })
     .then(function () {
       if (!asstMsg.ms) asstMsg.ms = Date.now() - started;
       finish(refs);
@@ -2572,6 +2590,14 @@ function bindUI() {
     var on = e.currentTarget.getAttribute("aria-checked") !== "true";
     e.currentTarget.setAttribute("aria-checked", on ? "true" : "false");
     patchSettings({ systemEnabled: on });
+  });
+
+  $("#mcpAll").addEventListener("click", function (e) {
+    var on = e.currentTarget.getAttribute("aria-checked") !== "true";
+    patchSettings({ mcpAll: on });
+    renderSettings();
+    $("#toolsStatus").textContent = "";
+    $("#toolsStatus").className = "set-tools-status";
   });
 
   $("#showReasoning").addEventListener("click", function (e) {

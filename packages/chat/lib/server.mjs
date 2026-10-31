@@ -73,6 +73,7 @@ async function fontCss() {
 
 const DEFAULTS = {
   model: "", effort: "", system: "", instructions: [], skills: [], mcp: [],
+  mcpAll: false,    // 用 magpie Library 里的全部 MCP 服务器（以后新加的也算），不看 mcp 里勾的
   temperature: 0.7, maxTokens: 0, showReasoning: true,
   pinned: [],       // 置顶的对话 id，按置顶顺序排在列表最前
   sidebar: true,    // 左侧栏是否展开
@@ -93,6 +94,7 @@ function cleanSettings(raw) {
     instructions: Array.isArray(s.instructions) ? s.instructions.map(String) : [],
     skills: Array.isArray(s.skills) ? s.skills.map(String) : [],
     mcp: Array.isArray(s.mcp) ? s.mcp.map(String) : [],
+    mcpAll: s.mcpAll === true,
     temperature: Number.isFinite(Number(s.temperature)) ? Number(s.temperature) : 0.7,
     maxTokens: Number.isFinite(Number(s.maxTokens)) ? Number(s.maxTokens) : 0,
     showReasoning: s.showReasoning !== false,
@@ -342,6 +344,14 @@ function toGatewayContent(m) {
   return parts;
 }
 
+// 这轮要用的 MCP 服务器：开了「全部」就是 Library 里的每一个（每次现读，
+// 后来在 magpie 里加的也在内），否则只用勾选的那些
+export function pickServers(servers, settings) {
+  if (settings?.mcpAll === true) return servers.slice();
+  const names = settings?.mcp || [];
+  return servers.filter((s) => names.includes(s.name));
+}
+
 // 一轮对话：可多次工具调用；把每条增量转成 SSE 发回浏览器
 async function runChat({ res, body, settings, store, options }, controllers) {
   const clientId = String(body.clientId || "");
@@ -354,7 +364,7 @@ async function runChat({ res, body, settings, store, options }, controllers) {
   const effort = String(body.effort ?? settings.effort ?? "");
   const temperature = Number.isFinite(Number(body.temperature)) ? Number(body.temperature) : settings.temperature;
   const maxTokens = Number.isFinite(Number(body.maxTokens)) ? Number(body.maxTokens) : settings.maxTokens;
-  const wantTools = body.useTools !== false && (settings.mcp || []).length > 0;
+  const wantTools = body.useTools !== false && (settings.mcpAll === true || (settings.mcp || []).length > 0);
 
   const history = Array.isArray(body.messages) ? body.messages.filter((m) => m && (m.role === "user" || m.role === "assistant")) : [];
   // 只挂了图片/文件、没写文字的消息也算有内容
@@ -370,7 +380,7 @@ async function runChat({ res, body, settings, store, options }, controllers) {
   let toolNote = "";
   if (wantTools) {
     const servers = await readMcp();
-    const picked = servers.filter((s) => (settings.mcp || []).includes(s.name));
+    const picked = pickServers(servers, settings);
     const all = [];
     for (const s of picked) {
       try {
@@ -672,7 +682,7 @@ export async function startServer({ configDir: dirArg, options = {} } = {}) {
         if (path === "/api/library" && req.method === "GET") return send(res, 200, await libraryView(dir));
         if (path === "/api/mcp/tools" && req.method === "GET") {
           const settings = await store.settings();
-          const servers = (await readMcp(dir)).filter((s) => settings.mcp.includes(s.name));
+          const servers = pickServers(await readMcp(dir), settings);
           const out = [];
           for (const s of servers) {
             try {

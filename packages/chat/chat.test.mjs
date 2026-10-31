@@ -55,6 +55,9 @@ afterAll(async () => {
 
 // node:http, so the test sets Host and Origin exactly as a hostile page would
 function raw(method, path, headers = {}, body) {
+  return rawOn(port, method, path, headers, body)
+}
+function rawOn(port, method, path, headers = {}, body) {
   return new Promise((resolve, reject) => {
     const req = request({ host: "127.0.0.1", port, method, path, headers: { host: `127.0.0.1:${port}`, ...headers } }, (res) => {
       let data = ""
@@ -360,4 +363,101 @@ test("finish() renders a reply that arrived in one chunk", () => {
   const app = readFileSync(join(dir, "chat", "app.js"), "utf8")
   // 不能只判 .md-stable：整段一次到达时那个结构根本不存在
   expect(app).toMatch(/else if \(refs\.body && refs\.msg\.content\) renderMarkdown\(refs\.body, refs\.msg\.content\)/)
+})
+
+// ---------- 0.1.6: one switch for every MCP server in magpie's Library ----------
+
+// a Streamable-HTTP MCP server on a free port that lists one tool
+function fakeMcp(tool) {
+  return Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(req) {
+      const msg = await req.json()
+      if (msg.id === undefined) return new Response(null, { status: 202 })
+      const result = msg.method === "initialize"
+        ? { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: tool, version: "1" } }
+        : msg.method === "tools/list"
+          ? { tools: [{ name: tool, description: "search " + tool, inputSchema: { type: "object", properties: {} } }] }
+          : {}
+      return Response.json({ jsonrpc: "2.0", id: msg.id, result })
+    },
+  })
+}
+
+test("with mcpAll on, a chat gets every Library server's tools, one added later too, and none ticked", async () => {
+  // a service of its own: the last one started owns the Host allow list, and
+  // an earlier test started another
+  const { startServer } = await import("./lib/server.mjs")
+  const own = await startServer({ configDir: cfg, options: { port: 0 } })
+  const raw = (...args) => rawOn(own.port, ...args)
+  const h = { ...json, origin: "null", "x-magpie-chat-token": token }
+  const a = fakeMcp("search_alpha"), b = fakeMcp("search_beta"), c = fakeMcp("search_gamma")
+  const lib = (list) => writeFileSync(join(cfg, "library.json"), JSON.stringify({
+    mcp: list.map(([name, srv]) => ({ name, transport: "http", url: `http://127.0.0.1:${srv.port}/mcp`, agents: [] })),
+  }))
+  const toolNames = async () => {
+    const before = seen.length
+    const res = await raw("POST", "/api/chat", h, { ...chatBody, messages: [{ role: "user", content: "search something" }] })
+    expect(res.status).toBe(200)
+    expect(seen.length).toBe(before + 1)
+    return (seen.at(-1).body.tools || []).map((t) => t.function.name).sort()
+  }
+  try {
+    lib([["a", a], ["b", b]])
+    // off and nothing ticked: no tools, as before
+    await raw("POST", "/api/settings", h, { mcp: [], mcpAll: false })
+    expect(await toolNames()).toEqual([])
+    // off with one ticked: only that one
+    await raw("POST", "/api/settings", h, { mcp: ["a"] })
+    expect(await toolNames()).toEqual(["a_search_alpha"])
+    // on: every server, whatever is ticked; the setting is kept
+    const saved = JSON.parse((await raw("POST", "/api/settings", h, { mcp: [], mcpAll: true })).body)
+    expect(saved.mcpAll).toBe(true)
+    expect(JSON.parse((await raw("GET", "/api/settings", h)).body).mcpAll).toBe(true)
+    expect(await toolNames()).toEqual(["a_search_alpha", "b_search_beta"])
+    // a server added to magpie's Library afterwards is in the next chat
+    lib([["a", a], ["b", b], ["c", c]])
+    expect(await toolNames()).toEqual(["a_search_alpha", "b_search_beta", "c_search_gamma"])
+    // and "check connection" checks the same servers
+    const check = JSON.parse((await raw("GET", "/api/mcp/tools", h)).body)
+    expect(check.servers.map((s) => s.name).sort()).toEqual(["a", "b", "c"])
+  } finally {
+    await raw("POST", "/api/settings", h, { mcp: [], mcpAll: false })
+    rmSync(join(cfg, "library.json"), { force: true })
+    a.stop(true); b.stop(true); c.stop(true)
+    await own.close()
+  }
+})
+
+test("mcpAll defaults to off, so an existing user's settings keep ticking", async () => {
+  const { pickServers } = await import("./lib/server.mjs")
+  const servers = [{ name: "a" }, { name: "b" }]
+  expect(pickServers(servers, { mcp: ["b"] }).map((s) => s.name)).toEqual(["b"])
+  expect(pickServers(servers, { mcp: ["b"], mcpAll: true }).map((s) => s.name)).toEqual(["a", "b"])
+  const { createStore } = await import("./lib/server.mjs")
+  const fresh = mkdtempSync(join(tmp, "fresh-"))
+  expect((await createStore(fresh).settings()).mcpAll).toBe(false)
+  // a settings.json written by 0.1.5 has no mcpAll
+  writeFileSync(join(createStore(fresh).dir, "settings.json"), JSON.stringify({ mcp: ["b"] }))
+  const old = await createStore(fresh).settings()
+  expect(old.mcpAll).toBe(false)
+  expect(old.mcp).toEqual(["b"])
+})
+
+test("the chat UI asks for tools when mcpAll is on with nothing ticked, and flushes settings before it sends", () => {
+  const app = readFileSync(join(dir, "chat", "app.js"), "utf8")
+  const start = app.indexOf("function wantsTools")
+  expect(start).toBeGreaterThan(0)
+  const end = app.indexOf("\n}\n", start) + 3
+  const wantsTools = new Function(app.slice(start, end) + "\nreturn wantsTools")()
+  expect(wantsTools({ mcp: [], mcpAll: true })).toBe(true)
+  expect(wantsTools({ mcp: ["a"], mcpAll: false })).toBe(true)
+  expect(wantsTools({ mcp: [], mcpAll: false })).toBe(false)
+  expect(app).toContain("useTools: wantsTools(state.settings)")
+  // the server picks servers from the saved settings, so a switch flipped just before sending is saved first
+  expect(app).toMatch(/var saved = saveTimer \? flushSettings\(\) : Promise\.resolve\(\);\s*saved\.then\(function \(\) \{ return streamChat\(/)
+  const html = readFileSync(join(dir, "chat", "index.html"), "utf8")
+  expect(html).toMatch(/id="mcpAll"[^>]*role="switch"/)
+  expect(html).not.toContain("<select")
 })
