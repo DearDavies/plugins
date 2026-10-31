@@ -19,6 +19,9 @@ beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), 'magpie-fingerprint-test-'));
   await mkdir(join(dir, 'ui'));
   await writeFile(join(dir, 'ui/index.html'), '<!doctype html><head></head><body>Test</body>');
+  await mkdir(join(dir, 'ui/assets'));
+  await writeFile(join(dir, 'ui/assets/app.js'), 'export {};');
+  await writeFile(join(dir, 'outside.txt'), 'not served');
   service = await startServer({ port: 0, dataDir: dir, uiDir: join(dir, 'ui'), demo: true });
   base = `http://127.0.0.1:${service.port}`;
   const html = await (await fetch(base)).text();
@@ -64,6 +67,40 @@ test('allows the native WebKit sandbox to connect only to the validated listener
       'content-security-policy',
     ),
   ).toBe(false);
+});
+test("names its own origins in every fetch directive, since a sandboxed page matches nothing to 'self' in WebKitGTK", async () => {
+  const directives = (policy: string) =>
+    new Map(
+      policy.split(';').map((part) => {
+        const [name, ...sources] = part.trim().split(/\s+/);
+        return [name, sources] as const;
+      }),
+    );
+  const proxy = 'https://magpie.example:9443';
+  for (const [host, query, want] of [
+    [`127.0.0.1:${service.port}`, '', [`http://127.0.0.1:${service.port}`]],
+    [`localhost:${service.port}`, '', [`http://localhost:${service.port}`]],
+    [
+      `127.0.0.1:${service.port}`,
+      `?uiOrigin=${encodeURIComponent(proxy)}`,
+      [`http://127.0.0.1:${service.port}`, proxy],
+    ],
+  ] as const) {
+    const page = await fetch(`${base}/${query}`, { headers: { host } });
+    const policy = directives(page.headers.get('content-security-policy')!);
+    for (const name of ['default-src', 'script-src', 'style-src', 'img-src', 'connect-src'])
+      for (const source of want) expect(policy.get(name)).toContain(source);
+    expect(policy.get('script-src')).not.toContain("'unsafe-inline'");
+    expect(policy.get('script-src')!.some((s) => s.startsWith("'nonce-"))).toBe(true);
+  }
+});
+test('serves the interface assets on every system, and nothing outside them', async () => {
+  const asset = await fetch(`${base}/assets/app.js`);
+  expect(asset.status).toBe(200);
+  expect(asset.headers.get('content-type')).toBe('text/javascript');
+  expect(await asset.text()).toBe('export {};');
+  for (const path of ['/assets/missing.js', '/%2e%2e/outside.txt', '/assets/%2e%2e/%2e%2e/outside.txt', '/..%5coutside.txt'])
+    expect((await fetch(`${base}${path}`)).status).toBe(404);
 });
 test('demo is explicitly identified; catalog and history never pretend to be measurements', async () => {
   const boot = await (await api('bootstrap')).json();

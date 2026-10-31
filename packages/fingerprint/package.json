@@ -1,6 +1,6 @@
 {
   "name": "@magpie-community/page-fingerprint",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Check for suspected model substitution with numeric response fingerprints in Magpie, powered by lm-detector.",
   "type": "module",
   "license": "MIT",

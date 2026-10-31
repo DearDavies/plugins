@@ -1,6 +1,6 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, mkdir, rename, unlink, access } from 'node:fs/promises';
-import { join, resolve, extname } from 'node:path';
+import { join, resolve, relative, isAbsolute, extname } from 'node:path';
 import { loadDetector, parseNumbers, type Detector } from '../vendor/lmfpd-sdk/index.js';
 import { options, type Options } from './config';
 import { Gateway } from './gateway';
@@ -642,9 +642,14 @@ export async function startServer(input: Options = {}) {
               )
                 throw new Error('Invalid UI origin.');
             }
-            const connectSources = [
+            // This document's own origins, named: in magpie's frame the
+            // document is sandboxed to an opaque origin, and WebKitGTK
+            // (magpie's Linux window) then matches nothing to 'self', so
+            // a policy of 'self' alone loads no script, style or image
+            // there and the page stays blank.
+            const ownSources = [
               ...new Set([`http://${host}`, ...(uiOrigin ? [uiOrigin] : [])]),
-            ];
+            ].join(' ');
             let html = await readFile(join(uiDir, 'index.html'), 'utf8').catch(
               () =>
                 '<!doctype html><title>Build required</title><p>Run bun run build to create the Fingerprint interface.</p>',
@@ -669,13 +674,16 @@ export async function startServer(input: Options = {}) {
                 // Opaque sandbox origins cannot reliably match 'self'. The
                 // launcher supplies the HTTP(S) origin of Magpie's proxy;
                 // it affects this document's CSP only, never API admission.
-                'content-security-policy': `default-src 'self'; connect-src 'self' ${connectSources.join(' ')}; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'`,
+                'content-security-policy': `default-src 'self' ${ownSources}; connect-src 'self' ${ownSources}; script-src 'self' ${ownSources} 'nonce-${nonce}'; style-src 'self' ${ownSources} 'unsafe-inline'; img-src 'self' ${ownSources} data:; object-src 'none'; base-uri 'none'; form-action 'none'`,
               },
             });
           }
           const decoded = decodeURIComponent(url.pathname);
           const file = resolve(uiDir, `.${decoded}`);
-          if (!file.startsWith(`${resolve(uiDir)}/`) || decoded.includes('..'))
+          // inside uiDir by the system's own separator: on Windows resolve
+          // gives back slashes, and a check for "/" refused every asset
+          const inside = relative(resolve(uiDir), file);
+          if (!inside || inside.startsWith('..') || isAbsolute(inside) || decoded.includes('..'))
             return new Response('Not found', { status: 404 });
           const asset = Bun.file(file);
           if (!(await asset.exists())) return new Response('Not found', { status: 404 });

@@ -68,8 +68,17 @@
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(text.invalidPort);
     let service = window.magpie?.service;
     if (!service) {
+      // This computer's window: wails://localhost on macOS and Linux,
+      // http://wails.localhost on Windows (Wails v3, WebView2).
+      const host = String(location.hostname || '')
+        .toLowerCase()
+        .replace(/^\[|\]$/g, '');
       const local =
-        !location.hostname || ['localhost', '127.0.0.1', '::1'].includes(location.hostname);
+        !host ||
+        host === 'localhost' ||
+        host.endsWith('.localhost') ||
+        host === '::1' ||
+        /^127\./.test(host);
       if (!local) {
         status.textContent = text.remote;
         return;

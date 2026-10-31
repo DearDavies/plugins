@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
 
 const source = await readFile(new URL('../page/boot.js', import.meta.url), 'utf8');
-async function boot(lang?: string, remote = false, port = 3488) {
+async function boot(lang?: string, remote = false, port = 3488, desktopHost = '') {
   const elements = {
     status: { textContent: 'Connecting to Fingerprint…' },
     title: { textContent: 'Fingerprint' },
@@ -14,7 +14,8 @@ async function boot(lang?: string, remote = false, port = 3488) {
     getElementById: (id: keyof typeof elements) => elements[id],
   };
   let destination: URL | undefined;
-  const service = remote ? '' : 'http://127.0.0.1:3488/';
+  // magpie hands no service to its desktop window, only to magpie web
+  const service = remote || desktopHost ? '' : 'http://127.0.0.1:3488/';
   await runInNewContext(source, {
     URL,
     document,
@@ -29,7 +30,7 @@ async function boot(lang?: string, remote = false, port = 3488) {
       },
     },
     location: {
-      hostname: remote ? 'magpie.example' : '127.0.0.1',
+      hostname: desktopHost || (remote ? 'magpie.example' : '127.0.0.1'),
       href: 'http://127.0.0.1/boot/index.html',
       replace: (url: string) => {
         destination = new URL(url);
@@ -66,4 +67,15 @@ test('boot localizes remote-service guidance and invalid-port errors', async () 
   const invalid = await boot('de', false, -1);
   expect(invalid.destination).toBeUndefined();
   expect(invalid.elements.status.textContent).toContain('Ungültiger Port');
+});
+
+test("boot goes to the local service from magpie's desktop window on every system", async () => {
+  // Wails v3: wails://localhost on macOS and Linux, http://wails.localhost
+  // on Windows (WebView2), where the page said "upgrade Magpie" instead
+  for (const host of ['localhost', 'wails.localhost', '[::1]', '127.0.0.1']) {
+    const result = await boot('zh-CN', false, 3490, host);
+    expect(result.destination?.origin).toBe('http://127.0.0.1:3490');
+    expect(result.destination?.searchParams.get('uiOrigin')).toBe('http://127.0.0.1:3490');
+    expect(result.elements.status.textContent).not.toContain('升级');
+  }
 });

@@ -14,9 +14,11 @@ desktop window it is reached at `http://127.0.0.1:<port>`; in `magpie web`,
 Magpie supplies `magpie.service`, a tokenized reverse-proxy URL. The service
 does not expose the gateway listener. Its authenticated API accepts its local
 page and the opaque `Origin: null` used by Magpie's sandbox, and rejects unrelated origins.
-The page CSP explicitly allows connections to the validated local listener and,
-when proxied, the HTTP(S) origin supplied by the page launcher. Opaque sandbox
-frames cannot reliably match `connect-src 'self'`. The launcher origin changes
+The page CSP names the validated local listener and, when proxied, the HTTP(S)
+origin supplied by the page launcher in every fetch directive (default, script,
+style, image and connect). Opaque sandbox frames cannot reliably match `'self'`:
+WebKitGTK, magpie's Linux window, matches nothing to it there, so a policy of
+`'self'` alone loads no script and the page stays blank. The launcher origin changes
 only the document policy; the API bearer token and Host/Origin checks still apply.
 
 ## UI integration
