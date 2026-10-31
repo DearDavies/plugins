@@ -13,7 +13,9 @@ import type { Mode, ModelInfo } from "../types/models";
 import type { SlashCommand } from "../composer/slashMenu";
 import { toast } from "./Toast";
 import { useLiveSettings } from "./Settings";
-import { permissionModes, composerModeOptions } from "../i18n/modes.js";
+import { composerModeOptions, effortLabel } from "../i18n/modes.js";
+import { Logo } from "./Logo";
+import { SelectMenu } from "./SelectMenu";
 import { errMsg, t as tr, tf } from "../i18n/index.js";
 import {
   applySlashPick,
@@ -181,12 +183,15 @@ export function Composer() {
     if (running && behavior === "queue") setLastSent((s) => [...s, msg]);
     setText("");
     try {
-      await ws.call("thread.send", {
+      const r = (await ws.call("thread.send", {
         id, text: msg,
         attachments: attachments.map((a) => ({ path: a.path, mime: a.mime, name: a.name })),
         behavior: running && behavior === "steer" && steerOk ? "steer" : "queue",
-      });
+      })) as { delivered?: "started" | "steered" | "queued" } | undefined;
       setAttachments([]);
+      // Say what really happened to a message sent mid-turn (B7: agents without steer queue it)
+      if (r?.delivered === "queued" && running) toast(tr("composer.queuedToast"));
+      else if (r?.delivered === "steered") toast(tr("composer.steeredToast"));
       if (!running) setLastSent((s) => [...s.slice(-9), msg]);
     } catch (e) {
       setText(msg);
@@ -323,7 +328,7 @@ export function Composer() {
   const modelLabel = (() => {
     if (!thread?.model) {
       const d = provider?.models?.find((x) => x.isDefault);
-      return d ? `${tr("composer.defaultModel")} · ${d.name}` : tr("composer.defaultModel");
+      return d ? d.name : tr("composer.defaultModel");
     }
     const m = provider?.models?.find((x) => x.id === thread.model);
     let name = m?.name ?? thread.model;
@@ -417,7 +422,7 @@ export function Composer() {
             ref={taRef}
             className="cp-ta"
             rows={1}
-            placeholder={waiting ? tr("composer.waitPerm") : running ? tr("composer.queuePlaceholder") : tr("composer.inputPlaceholder")}
+            placeholder={waiting ? tr("composer.waitPerm") : running ? tr(steerOk ? "composer.queuePlaceholder" : "composer.queuePlaceholderNoSteer") : tr("composer.inputPlaceholder")}
             value={text}
             disabled={waiting}
             onChange={(e) => {
@@ -431,9 +436,11 @@ export function Composer() {
         <div className="cp-bar">
           {/* Agent·model pill */}
           <div className="pill-wrap" ref={pickerRef}>
-            <button className="pill" onClick={() => openPicker(!agentPop)} title={tr("composer.agentModel")}>
+            <button className="pill chip" onClick={() => openPicker(!agentPop)} title={tr("composer.agentModel")}>
+              <Logo size={18} className="chip-logo" />
               <span className="p-a">{provider?.name ?? thread?.provider ?? tr("composer.agent")}</span>
               <span className="p-t">{modelLabel}</span>
+              <svg className="chip-caret" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2.5 4l2.5 2.5L7.5 4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
             </button>
             {agentPop && (
               <div className="pop agent-pop agent-picker">
@@ -557,44 +564,74 @@ export function Composer() {
               </div>
             )}
           </div>
-          {/* thinking level */}
+          {/* thinking level: icon + short label; the menu is the page's own (SelectMenu), opening upwards */}
           {showThinking && (
-            <select className="pill sel" value={thread?.effort ?? ""} title={tr("composer.effortTitle")}
-              onChange={(e) => setEffort(e.target.value || null)}>
-              <option value="">
-                {defaultThinking
-                  ? tf("composer.defaultEffortNamed", { level: defaultThinking })
-                  : tr("composer.defaultEffort")}
-              </option>
-              {thinkingOpts.map((e) => <option key={e.id} value={e.id}>{e.label}</option>)}
-            </select>
+            <SelectMenu
+              className="pill ipill"
+              title={tr("composer.effortTitle")}
+              ariaLabel={tr("composer.effortTitle")}
+              prefer="up"
+              upAnchor=".cp-card"
+              value={thread?.effort ?? ""}
+              onChange={(v) => setEffort(v || null)}
+              options={[
+                {
+                  value: "",
+                  label: defaultThinking
+                    ? tf("composer.defaultEffortNamed", { level: effortLabel(defaultThinking) })
+                    : tr("composer.defaultEffort"),
+                },
+                // an Agent's own "default" level is the same thing as the first entry
+                ...thinkingOpts.filter((e) => e.id !== "default").map((e) => ({ value: e.id, label: effortLabel(e.id, e.label) })),
+              ]}
+            >
+              <Icon name="gauge" size={14} />
+              <span className="ip-l">{(() => {
+                const cur = thread?.effort ?? defaultThinking;
+                if (!cur) return tr("composer.defaultEffort");
+                return effortLabel(cur, thinkingOpts.find((o) => o.id === cur)?.label);
+              })()}</span>
+            </SelectMenu>
           )}
           {/* permission mode: list only the modes this Agent really has; hidden when there is only one (e.g. Pi has no modes) */}
-          {modes.length > 1 && (
-            <select
-              className={`pill sel${mode === "bypassPermissions" ? " danger" : ""}`}
-              // The mode stored on the conversation doesn't exist for this Agent (e.g. the default setting is Accept File Edits but OpenCode only has build/plan) → show the first one it will actually use
-              value={modes.some((m) => m.id === mode) ? mode : modes[0].id}
-              title={modeMeta?.desc}
-              onChange={(e) => setMode(e.target.value as Mode)}
-            >
-              {modes.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-            </select>
-          )}
-          {/* Cursor speed (like Paseo's Fast toggle); the old shield (auto-accept permissions) was removed */}
+          {modes.length > 1 && (() => {
+            // The mode stored on the conversation doesn't exist for this Agent → show the one it will actually use
+            const shown = modes.find((m) => m.id === mode) ?? modes[0]!;
+            return (
+              <SelectMenu
+                className={`pill ipill${shown.danger ? " danger" : ""}`}
+                title={shown.desc}
+                ariaLabel={tr("composer.modeTitle")}
+                prefer="up"
+              upAnchor=".cp-card"
+                menuClassName="mode-menu"
+                value={shown.id}
+                onChange={(v) => setMode(v as Mode)}
+                options={modes.map((m) => ({ value: m.id, label: m.label, hint: m.desc, danger: m.danger }))}
+              >
+                <Icon name="shield" size={14} />
+                <span className="ip-l">{shown.label}</span>
+              </SelectMenu>
+            );
+          })()}
+          {/* Cursor speed (like Paseo's Fast toggle) */}
           {thread?.provider === "cursor" && (
-            <select
-              className="pill sel cursor-fast"
-              value={thread.cursorFast ? "fast" : "off"}
+            <SelectMenu
+              className="pill ipill cursor-fast"
               title="Fast"
-              onChange={(e) => setCursorOpts({ cursorFast: e.target.value === "fast" })}
+              ariaLabel="Fast"
+              prefer="up"
+              upAnchor=".cp-card"
+              value={thread.cursorFast ? "fast" : "off"}
+              onChange={(v) => setCursorOpts({ cursorFast: v === "fast" })}
+              options={[{ value: "off", label: "Fast: Off" }, { value: "fast", label: "Fast: On" }]}
             >
-              <option value="off">Fast: Off</option>
-              <option value="fast">Fast: On</option>
-            </select>
+              <span className="ip-l">{thread.cursorFast ? "Fast: On" : "Fast: Off"}</span>
+            </SelectMenu>
           )}
+          <span className="cp-div" aria-hidden="true" />
           {/* attachments */}
-          <button className="ibtn" title={tr("composer.attachTitle")} onClick={() => fileRef.current?.click()}>
+          <button className="ibtn cp-attach" title={tr("composer.attachTitle")} onClick={() => fileRef.current?.click()}>
             <Icon name="attach" />
           </button>
           <input ref={fileRef} type="file" hidden multiple accept="image/*,.txt,.md,.log,.json,.csv"
@@ -603,19 +640,29 @@ export function Composer() {
             {running ? (
               <>
                 <span className="cp-clock">{elapsed}s</span>
+                {(text.trim() || attachments.length > 0) && (
+                  <button className="cp-send" title={tr(steerOk && prefs.runningSend === "steer" ? "settings.steer" : "settings.queue")}
+                    disabled={waiting || attachments.some((a) => a.uploading)}
+                    onClick={() => void send(prefs.runningSend === "steer" && steerOk ? "steer" : "queue")}>
+                    <Icon name="arrowUp" />
+                  </button>
+                )}
                 <button className="cp-stop" title={tr("common.stop")} onClick={() => void ws.call("thread.interrupt", { id: thread?.id })}>
-                  <Icon name="stop" />
+                  <Icon name="stopFill" />
                 </button>
               </>
             ) : (
               <button className="cp-send" title={tr("common.send")} disabled={waiting || (!text.trim() && attachments.length === 0) || attachments.some((a) => a.uploading)}
                 onClick={() => void send("queue")}>
-                <Icon name="send" />
+                <Icon name="arrowUp" />
               </button>
             )}
           </div>
         </div>
       </div>
+      {running && !steerOk && prefs.runningSend === "steer" && (
+        <div className="cp-hint">{tf("composer.steerUnsupported", { agent: provider?.name ?? thread?.provider ?? "" })}</div>
+      )}
     </div>
   );
 }
