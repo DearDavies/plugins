@@ -1660,7 +1660,10 @@ function unsaid(res) {
     const c = chunkOf(ev)?.choices?.[0]
     const text = typeof c?.delta?.content === "string" ? c.delta.content : ""
     const finish = c?.finish_reason
-    if (c?.delta?.tool_calls || (text && !filterSaid(said + text))) {
+    // copilot.tencent.com sends "tool_calls": [] on every delta, text
+    // too: only a list with a call in it is one
+    const calls = c?.delta?.tool_calls
+    if ((Array.isArray(calls) ? calls.length > 0 : calls) || (text && !filterSaid(said + text))) {
       open = false
       const out = [...held, ev]
       held = []

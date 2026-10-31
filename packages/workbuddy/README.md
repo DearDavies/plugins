@@ -251,7 +251,9 @@ same words ending `stop`, or the filter cutting off a reply after other
 words, go through as they came.
 copilot.tencent.com sends the line with a newline on each side
 (`"\nSorry, I can't respond to this question.\n"`); since 0.2.5 white
-space around it no longer lets it through.
+space around it no longer lets it through. It also puts `"tool_calls": []` on
+every delta; since 0.2.6 only a list with a call in it lets the reply
+through as it came.
 
 ## Models
 
