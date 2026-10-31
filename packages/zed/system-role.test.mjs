@@ -79,10 +79,11 @@ test("an empty system message that only carries a turn's effort is left out", as
       { role: "user", content: "again" },
     ],
   })
+  // (a string content goes as blocks: string-content.test.mjs)
   expect(r.messages).toEqual([
-    { role: "user", content: "hi" },
-    { role: "assistant", content: "hello" },
-    { role: "user", content: "again" },
+    { role: "user", content: [{ type: "text", text: "hi" }] },
+    { role: "assistant", content: [{ type: "text", text: "hello" }] },
+    { role: "user", content: [{ type: "text", text: "again" }] },
   ])
   expect(r.output_config).toEqual({ effort: "high" })
 })

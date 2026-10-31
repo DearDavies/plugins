@@ -630,6 +630,13 @@ function providerRequest(wire, req, model) {
         }
       }
       if (Array.isArray(req.messages)) req.messages = withoutSystemTurns(req.messages)
+      // Zed's cloud takes a message's content as blocks only: a string, which
+      // Anthropic's own API takes as one text block, is answered 400 "failed
+      // to parse Anthropic request: invalid type: string, expected a
+      // sequence" (magpie's model test sends "hi" so; Been on Discord)
+      for (const m of Array.isArray(req.messages) ? req.messages : []) {
+        if (typeof m?.content === "string") m.content = asBlocks(m.content)
+      }
       return { req, stream }
     }
     case "responses": {
