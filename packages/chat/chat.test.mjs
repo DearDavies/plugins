@@ -20,11 +20,31 @@ delete process.env.MAGPIE_GATEWAY_KEY
 delete process.env.MAGPIE_ADDR
 
 const seen = []
+// magpie's own MCP servers the fake gateway lists on /v1/magpie/mcp; null
+// answers 404, as a magpie from before the list does
+let ownList = null
+const ownAuth = []
 const gateway = Bun.serve({
   port: 0,
   hostname: "127.0.0.1",
   async fetch(req) {
     const url = new URL(req.url)
+    if (url.pathname === "/v1/magpie/mcp") {
+      return ownList ? Response.json({ servers: ownList }) : new Response("no", { status: 404 })
+    }
+    if (url.pathname.startsWith("/mcp/magpie/")) {
+      // one of magpie's own servers: its tool is named for its path
+      ownAuth.push(req.headers.get("authorization"))
+      const msg = await req.json()
+      if (msg.id === undefined) return new Response(null, { status: 202 })
+      const tool = "own_" + url.pathname.slice("/mcp/magpie/".length).replace(/\W/g, "_")
+      const result = msg.method === "initialize"
+        ? { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: tool, version: "1" } }
+        : msg.method === "tools/list"
+          ? { tools: [{ name: tool, description: "search " + tool, inputSchema: { type: "object", properties: {} } }] }
+          : {}
+      return Response.json({ jsonrpc: "2.0", id: msg.id, result })
+    }
     if (url.pathname === "/v1/models") return Response.json({ data: [{ id: "fake/model", owned_by: "fake" }] })
     if (url.pathname === "/v1/chat/completions") {
       seen.push({ auth: req.headers.get("authorization"), body: await req.json() })
@@ -460,4 +480,67 @@ test("the chat UI asks for tools when mcpAll is on with nothing ticked, and flus
   const html = readFileSync(join(dir, "chat", "index.html"), "utf8")
   expect(html).toMatch(/id="mcpAll"[^>]*role="switch"/)
   expect(html).not.toContain("<select")
+})
+
+// ---------- 0.1.7: magpie's own MCP servers beside the Library's ----------
+
+test("with mcpAll on, a chat gets magpie's own MCP servers that are on, beside the Library's", async () => {
+  const { startServer } = await import("./lib/server.mjs")
+  const own = await startServer({ configDir: cfg, options: { port: 0 } })
+  const raw = (...args) => rawOn(own.port, ...args)
+  const h = { ...json, origin: "null", "x-magpie-chat-token": token }
+  const a = fakeMcp("search_alpha"), img = fakeMcp("search_library_image")
+  writeFileSync(join(cfg, "library.json"), JSON.stringify({
+    mcp: [
+      { name: "a", transport: "http", url: `http://127.0.0.1:${a.port}/mcp`, agents: [] },
+      // installed from the Library under the same name as magpie's own: the Library's is used
+      { name: "magpie-image", transport: "http", url: `http://127.0.0.1:${img.port}/mcp`, agents: [] },
+    ],
+  }))
+  const toolNames = async () => {
+    const before = seen.length
+    const res = await raw("POST", "/api/chat", h, { ...chatBody, messages: [{ role: "user", content: "search something" }] })
+    expect(res.status).toBe(200)
+    expect(seen.length).toBe(before + 1)
+    return (seen.at(-1).body.tools || []).map((t) => t.function.name).sort()
+  }
+  try {
+    await raw("POST", "/api/settings", h, { mcp: [], mcpAll: true })
+    // a magpie without the list: the Library's alone, as before
+    ownList = null
+    expect(await toolNames()).toEqual(["a_search_alpha", "magpie-image_search_library_image"])
+    // web search and image recognition on, image generation listed too
+    ownList = [
+      { name: "magpie-web-search", title: "Magpie Web Search", path: "/mcp/magpie/web-search" },
+      { name: "magpie-vision", title: "Magpie Image Recognition", path: "/mcp/magpie/vision" },
+      { name: "magpie-image", title: "Magpie Image", path: "/mcp/magpie/image" },
+    ]
+    ownAuth.length = 0
+    expect(await toolNames()).toEqual([
+      "a_search_alpha",
+      "magpie-image_search_library_image",
+      "magpie-vision_own_vision",
+      "magpie-web-search_own_web_search",
+    ])
+    // they are asked with the same key as the gateway
+    expect(ownAuth.length).toBeGreaterThan(0)
+    expect(ownAuth.every((x) => x === "Bearer mk-test-key")).toBe(true)
+    // the page's list and "check connection" show them too
+    const lib = JSON.parse((await raw("GET", "/api/library", h)).body)
+    expect(lib.mcp.map((m) => m.name)).toEqual(["a", "magpie-image", "magpie-web-search", "magpie-vision"])
+    const check = JSON.parse((await raw("GET", "/api/mcp/tools", h)).body)
+    expect(check.servers.map((s) => s.name).sort()).toEqual(["a", "magpie-image", "magpie-vision", "magpie-web-search"])
+    // image recognition turned off in magpie: gone from the next chat
+    ownList = ownList.filter((m) => m.name !== "magpie-vision")
+    expect(await toolNames()).toEqual(["a_search_alpha", "magpie-image_search_library_image", "magpie-web-search_own_web_search"])
+    // ticked by itself, with the switch off, one of magpie's own is used alone
+    await raw("POST", "/api/settings", h, { mcp: ["magpie-web-search"], mcpAll: false })
+    expect(await toolNames()).toEqual(["magpie-web-search_own_web_search"])
+  } finally {
+    ownList = null
+    await raw("POST", "/api/settings", h, { mcp: [], mcpAll: false })
+    rmSync(join(cfg, "library.json"), { force: true })
+    a.stop(true); img.stop(true)
+    await own.close()
+  }
 })

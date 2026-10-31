@@ -344,7 +344,7 @@ function toGatewayContent(m) {
   return parts;
 }
 
-// 这轮要用的 MCP 服务器：开了「全部」就是 Library 里的每一个（每次现读，
+// 这轮要用的 MCP 服务器：开了「全部」就是 Library 里的每一个加上 magpie 自己开着的（每次现读，
 // 后来在 magpie 里加的也在内），否则只用勾选的那些
 export function pickServers(servers, settings) {
   if (settings?.mcpAll === true) return servers.slice();
@@ -379,7 +379,7 @@ async function runChat({ res, body, settings, store, options }, controllers) {
   let tools = [];
   let toolNote = "";
   if (wantTools) {
-    const servers = await readMcp();
+    const servers = await readMcp(undefined, options);
     const picked = pickServers(servers, settings);
     const all = [];
     for (const s of picked) {
@@ -518,7 +518,7 @@ async function runChat({ res, body, settings, store, options }, controllers) {
           if (!tool) {
             result = "没有这个工具：" + c.name; isError = true;
           } else {
-            const server = (await readMcp()).find((s) => s.name === tool.server);
+            const server = (await readMcp(undefined, options)).find((s) => s.name === tool.server);
             try {
               const out = await callTool(server, tool.rawName, args);
               result = out.text; isError = Boolean(out.isError);
@@ -614,7 +614,7 @@ export async function startServer({ configDir: dirArg, options = {} } = {}) {
             gateway,
             settings,
             models: list,
-            library: await libraryView(dir),
+            library: await libraryView(dir, options),
             error: gatewayError,
           });
         }
@@ -679,10 +679,10 @@ export async function startServer({ configDir: dirArg, options = {} } = {}) {
           const patch = await readBody(req);
           return send(res, 200, await store.saveSettings(patch));
         }
-        if (path === "/api/library" && req.method === "GET") return send(res, 200, await libraryView(dir));
+        if (path === "/api/library" && req.method === "GET") return send(res, 200, await libraryView(dir, options));
         if (path === "/api/mcp/tools" && req.method === "GET") {
           const settings = await store.settings();
-          const servers = pickServers(await readMcp(dir), settings);
+          const servers = pickServers(await readMcp(dir, options), settings);
           const out = [];
           for (const s of servers) {
             try {

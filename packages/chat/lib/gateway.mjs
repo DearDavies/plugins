@@ -120,6 +120,32 @@ function headers(extra = {}) {
   return h;
 }
 
+// magpie 自己的 MCP 服务器（网页搜索、识图、生图、插件工具）不在 library.json 里：
+// 网关的 /v1/magpie/mcp 列出现在开着的那几个（在 magpie 设置里关掉的不列）。
+// 老版本 magpie 没有这个接口（404）、网关连不上、答得不对，都当没有，不挡对话。
+export async function ownMcp(opts = {}) {
+  try {
+    const base = await resolveGateway(opts);
+    const res = await fetch(base + "/v1/magpie/mcp", { headers: headers(), signal: AbortSignal.timeout(2500) });
+    if (!res.ok) return [];
+    const body = await res.json();
+    const list = Array.isArray(body?.servers) ? body.servers : [];
+    const auth = headers().authorization;
+    return list
+      .filter((s) => s && typeof s.name === "string" && s.name && typeof s.path === "string" && s.path.startsWith("/"))
+      .map((s) => ({
+        name: s.name,
+        transport: "http",
+        url: base + s.path,
+        headers: auth ? { authorization: auth } : undefined,
+        detail: base + s.path,
+        builtin: true,
+      }));
+  } catch {
+    return [];
+  }
+}
+
 // 归一化成界面要用的形状：名字、思考档位、上下文、能不能看图
 export function normalizeModel(m) {
   const id = String(m.id || "");

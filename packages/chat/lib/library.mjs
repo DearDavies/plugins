@@ -5,6 +5,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { ownMcp } from "./gateway.mjs";
 
 export function configDir() {
   const xdg = process.env.XDG_CONFIG_HOME;
@@ -75,11 +76,11 @@ export async function readSkills(dir = configDir()) {
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export async function readMcp(dir = configDir()) {
+export async function readMcp(dir = configDir(), opts = {}) {
   // magpie 的 MCP 列表在配置目录的 library.json（library/ 里放的是指令和技能的正文）
-  const lib = await readJson(join(dir, "library.json"), {});
+  const [lib, own] = await Promise.all([readJson(join(dir, "library.json"), {}), ownMcp(opts)]);
   const list = Array.isArray(lib.mcp) ? lib.mcp : [];
-  return list.map((m) => ({
+  const mine = list.map((m) => ({
     name: m.name || m.url || m.command || "mcp",
     transport: m.transport === "stdio" ? "stdio" : "http",
     url: m.url,
@@ -89,11 +90,14 @@ export async function readMcp(dir = configDir()) {
     env: m.env && typeof m.env === "object" ? m.env : undefined,
     detail: m.url || [m.command, ...(m.args || [])].join(" "),
   }));
+  // 再加上 magpie 自己开着的那几个；Library 里装了同名的（比如 magpie-image）就用 Library 的
+  const names = new Set(mine.map((m) => m.name));
+  return [...mine, ...own.filter((m) => !names.has(m.name))];
 }
 
 // 给前端的精简视图（不带正文，免得 bootstrap 太重）
-export async function libraryView(dir = configDir()) {
-  const [instructions, skills, mcp] = await Promise.all([readInstructions(dir), readSkills(dir), readMcp(dir)]);
+export async function libraryView(dir = configDir(), opts = {}) {
+  const [instructions, skills, mcp] = await Promise.all([readInstructions(dir), readSkills(dir), readMcp(dir, opts)]);
   return {
     instructions: instructions.map(({ id, name, size }) => ({ id, name, size })),
     skills: skills.map(({ name, description }) => ({ name, description })),
