@@ -1938,7 +1938,10 @@ function buildMessages(req, uid, key) {
         const inner = typeof b.content === "string" ? [{ type: "text", text: b.content }] : Array.isArray(b.content) ? b.content : []
         const text = inner.filter((x) => x?.type === "text" && x.text).map((x) => x.text).join("\n\n")
         const images = inner.map(anthropicImage).filter(Boolean)
-        msgs.push({ role: TOOL, callID: pending[i].id, text: text || "(no output)", images, cache: marked(b) || marked(inner[inner.length - 1]) })
+        // Devin has no failed mark on a result: it is said in the text, as
+        // magpie's gateway says it on chat completions (failedAsText)
+        const said = text || "(no output)"
+        msgs.push({ role: TOOL, callID: pending[i].id, text: b.is_error ? "Error: " + said : said, images, cache: marked(b) || marked(inner[inner.length - 1]) })
         pending.splice(i, 1)
         continue
       }

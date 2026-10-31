@@ -59,7 +59,8 @@ The plugin's `fetch` handles this:
     message after the results ("[From the result of …]").
 - The Claude models are asked on Anthropic's Messages API
   (`@ai-sdk/anthropic`, `POST …/devin/v1/messages`); every other model
-  stays on chat completions (since 0.1.28, #566).
+  stays on chat completions (since 0.1.28, #566). A failed tool result
+  says so in its text, "Error: " first (0.1.29).
   - Each text block, system block, tool call turn and tool result is a
     `ChatMessagePrompt` of its own, in the order the client sent them, and
     one the client marked with `cache_control` carries

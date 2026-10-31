@@ -101,6 +101,24 @@ test("tool calls and results keep their own prompts and marks", () => {
   expect(offered).toEqual(["read_file"])
 })
 
+test("a failed result says so in its text, as on chat completions", () => {
+  const ps = prompts(
+    buildMessages(
+      {
+        model: "claude-haiku-5-5",
+        messages: [
+          { role: "user", content: "go" },
+          { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "Bash", input: {} }] },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "c1", content: "exit status 1", is_error: true }] },
+        ],
+      },
+      "claude-haiku-5-5",
+      "k",
+    ),
+  )
+  expect(ps.find((p) => p.role === 4).text).toBe("Error: exit status 1")
+})
+
 test("a Messages request's effort is read as magpie reads it", () => {
   expect(anthropicEffort({ thinking: { type: "adaptive" }, output_config: { effort: "high" } })).toBe("high")
   expect(anthropicEffort({ thinking: { type: "enabled", budget_tokens: 10000 } })).toBe("medium")
