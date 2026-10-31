@@ -40,8 +40,8 @@ A plugin page runs in a sandboxed frame with no network (`connect-src 'none'`). 
 
 ### What the service reads and sends
 
-- From magpie's config folder (`$XDG_CONFIG_HOME/magpie` or `~/.config/magpie`): `caller-keys.json` (the first gateway key, sent as `Authorization: Bearer` to the gateway, so the chat's usage is counted on that key), `providers.json` and `routing.json` (icons), `settings.json` (fonts), `library.json` and `library/` (MCP servers, instructions, skills).
-- To magpie's gateway: `MAGPIE_CHAT_GATEWAY` if set, else `MAGPIE_ADDR`, else `http://127.0.0.1:3425`. The key goes there, so set `MAGPIE_CHAT_GATEWAY` only to a gateway you trust.
+- From magpie's config folder (`$XDG_CONFIG_HOME/magpie` or `~/.config/magpie`): `caller-keys.json` (the first gateway key, sent as `Authorization: Bearer` to the gateway, so the chat's usage is counted on that key), `providers.json` and `routing.json` (icons), `settings.json` (fonts, and the gateway `port` when the build writes one there), `library.json` and `library/` (MCP servers, instructions, skills).
+- To magpie's gateway: `MAGPIE_CHAT_GATEWAY` if set, else `MAGPIE_ADDR`, else the `port` from magpie's `settings.json` (the portable build writes its real port there, e.g. `18086`), else `http://127.0.0.1:3425`. The key goes there, so set `MAGPIE_CHAT_GATEWAY` only to a gateway you trust.
 - To your MCP servers: what the model asks their tools, with the headers you configured for them. A stdio server's command is run as you configured it.
 
 ### Who can use the service
