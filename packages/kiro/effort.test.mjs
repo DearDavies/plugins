@@ -9,7 +9,7 @@ test("a thinking model offers xhigh as its own level", () => {
     expect(Object.keys(got.variants)).toEqual(["low", "medium", "high", "xhigh", "max"])
     expect(got.variants.xhigh).toEqual({ thinking: { type: "enabled", budgetTokens: 50000 } })
   }
-  expect(_internal.thinking({ output_config: { effort: "xhigh" } }, "claude-opus-5.5")).toBe(50000)
+  expect(_internal.thinking({ thinking: { type: "adaptive" }, output_config: { effort: "xhigh" } }, "claude-opus-5.5")).toBe(50000)
   // a model that doesn't think offers none
   expect(_internal.configModel({ id: "deepseek-3.2", name: "DeepSeek" }).variants).toBeUndefined()
 })
@@ -92,4 +92,40 @@ test("a model Kiro lists without effort fields keeps its budget", async () => {
   // reasoning.effort, the schema's other place for it, as the IDE reads it
   await listed([model("claude-opus-5.5", { properties: { thinking: OPUS_SCHEMA.properties.thinking, reasoning: OPUS_SCHEMA.properties.output_config } })])
   expect(repro("claude-opus-5.5", "max").additionalModelRequestFields).toEqual({ thinking: { type: "adaptive" }, reasoning: { effort: "max" } })
+})
+
+// #538 (zengxiaosong): thinking is asked for by the thinking object alone.
+// An effort with no thinking (Claude Code's title requests, or its turn with
+// thinking off), or with thinking disabled, was sent a budget, or adaptive
+// thinking at that level, for every effort above low.
+test("an effort without thinking asked for is sent no thinking, at every level", async () => {
+  for (const schema of [OPUS_SCHEMA, null]) {
+    await listed([model("claude-opus-5.5", schema)])
+    for (const effort of ["low", "medium", "high", "xhigh", "max"])
+      for (const th of [undefined, { type: "disabled" }, { type: "between_tools" }]) {
+        const req = { ...(th ? { thinking: th } : {}), output_config: { effort }, messages: [{ role: "user", content: "q" }] }
+        expect(_internal.thinking(req, "claude-opus-5.5")).toBe(0)
+        const body = JSON.parse(_internal.buildKiro(req, "claude-opus-5.5", "", _internal.thinking(req, "claude-opus-5.5")))
+        expect(body.additionalModelRequestFields).toBeUndefined()
+        expect(said(body)).not.toContain("thinking_mode")
+      }
+  }
+})
+
+// with thinking asked for, every level, low included, reaches Kiro as itself
+// when the model lists it, and as the budget otherwise
+test("each level with thinking on is the field Kiro lists, or its budget", async () => {
+  const budgets = { low: 10000, medium: 20000, high: 30000, xhigh: 50000, max: 50000 }
+  for (const th of [{ type: "adaptive" }, { type: "enabled", budget_tokens: 12345 }])
+    for (const [effort, b] of Object.entries(budgets)) {
+      const req = { thinking: th, output_config: { effort }, messages: [{ role: "user", content: "q" }] }
+      await listed([model("claude-opus-5.5", OPUS_SCHEMA)])
+      let body = JSON.parse(_internal.buildKiro(req, "claude-opus-5.5", "", _internal.thinking(req, "claude-opus-5.5")))
+      expect(body.additionalModelRequestFields).toEqual({ thinking: { type: "adaptive" }, output_config: { effort } })
+      expect(said(body)).not.toContain("max_thinking_length")
+      await listed([model("claude-opus-5.5", null)])
+      body = JSON.parse(_internal.buildKiro(req, "claude-opus-5.5", "", _internal.thinking(req, "claude-opus-5.5")))
+      expect(body.additionalModelRequestFields).toBeUndefined()
+      expect(said(body)).toContain(`<thinking_mode>enabled</thinking_mode><max_thinking_length>${b}</max_thinking_length>`)
+    }
 })

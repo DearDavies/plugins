@@ -842,10 +842,15 @@ function documentText(p) {
 }
 
 // thinking is whether the model is asked to think aloud, and for how
-// long: when the caller asked for it, of a Claude model (or Auto).
+// long: when the caller asked for it, of a Claude model (or Auto). Only a
+// thinking of type enabled or adaptive asks for it, as Anthropic's API
+// reads a request: an effort with no thinking (Claude Code's title and
+// other side requests, or its main turn with thinking turned off), or with
+// thinking disabled, is sent no thinking at any level (#538), as magpie's
+// gateway reads it too.
 function thinking(req, model) {
   const effort = req.output_config?.effort ?? ""
-  const on = req.thinking?.type === "enabled" || req.thinking?.type === "adaptive" || (effort && effort !== "low")
+  const on = req.thinking?.type === "enabled" || req.thinking?.type === "adaptive"
   if (!on || !thinks(String(model).toLowerCase())) return 0
   const budget = { low: 10000, high: 30000, xhigh: 50000, max: 50000 }[effort]
   if (budget) return budget

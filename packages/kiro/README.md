@@ -145,6 +145,10 @@ request:
   IDE sends it: `additionalModelRequestFields` with `thinking.type:
   "adaptive"` and `output_config.effort` (or `reasoning.effort`), and no
   budget. So xhigh and max stay apart there (#538).
+  Thinking is asked for only when the request's `thinking` is `enabled` or
+  `adaptive`. An effort with no `thinking`, or with it `disabled` (Claude
+  Code's title requests, or a turn with thinking off), is sent with no
+  thinking at any level.
 - Anthropic's hosted web search is answered with Kiro's own web search
   (see [Web search](#web-search)).
 - Kiro's failures keep their meaning:
