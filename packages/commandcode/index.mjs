@@ -450,24 +450,34 @@ async function accountJSON(path, key, timeout = 15_000) {
   return res.json()
 }
 
-// The plan names, by planId prefix, the longest first, with the dollars of
-// credits each gives a month (the CLI's getPlanInfo; "individual-pro-v1"
-// is the old Pro, $80 of them).
+// The plan names, by planId prefix, the longest first, with the credits
+// each gives a month (the CLI's getPlanInfo; "individual-pro-v1" is the
+// old Pro, 80 of them), and whether those credits are usage-value units.
+// On Go, GOAT and Pro a credit is not a dollar: Command Code's usage limits
+// page (2026-10-31) says "on Go, GOAT and Pro, credits are usage-value
+// units - full-allowance models like GLM-5.2 get $1 of usage per credit,
+// and lower-allowance models draw proportionally more credits per dollar".
+// GOAT's 70 credits are the "up to $100" its pricing page says on a $100
+// model, and $70 on GLM-5.2; Pro's 80 are "up to $110" (plugins #556). The
+// windows billing/credits caps are counted in the same units (GOAT's 14
+// and 35). So the month of those plans is said in credits, not as a dollar
+// pool none of their models spends. Provider is pay as you go, $15 a
+// month for API access with no credits in it: no month of credits.
 const PLAN_NAMES = [
-  ["individual-provider", "Provider", 15],
-  ["individual-pro-v1", "Pro", 80],
-  ["individual-goat", "GOAT", 70],
+  ["individual-provider", "Provider", 0],
+  ["individual-pro-v1", "Pro", 80, "units"],
+  ["individual-goat", "GOAT", 70, "units"],
   ["individual-ultra", "Ultra", 300],
   ["individual-max", "Max", 150],
-  ["individual-pro", "Pro", 30],
-  ["individual-go", "Go", 10],
+  ["individual-pro", "Pro", 30, "units"],
+  ["individual-go", "Go", 10, "units"],
   ["teams-pro", "Teams Pro", 40],
 ]
 const NO_PLAN = "No plan"
 
 function planOf(id) {
   const s = String(id ?? "").toLowerCase().replaceAll("_", "-")
-  return PLAN_NAMES.find(([p]) => s.startsWith(p)) ?? ["", "", 0]
+  return PLAN_NAMES.find(([p]) => s.startsWith(p)) ?? ["", "", 0, ""]
 }
 
 const planName = (id) => planOf(id)[1]
@@ -539,6 +549,10 @@ function money(v) {
   return "$" + (v < 0 ? "-" : "") + s
 }
 
+// credits is an amount of usage-value credits to the cent, as money
+// rounds dollars, without the dollar sign.
+const credits = (v) => money(v).replace("$", "")
+
 // limits is the plan's 5-hour and weekly windows in a credits reply,
 // those it gives a cap.
 function limits(c) {
@@ -557,19 +571,23 @@ function limits(c) {
 }
 
 // allowanceOf makes a credits reply into the plan's windows: the 5-hour
-// and weekly limits, and the dollars as one more, used of the CLI's pool
-// (the plan's month of credits, or what is left of it if more, and the
-// bought and free ones) as its /usage bar is. The dollars, the plan's
-// whole allowance, go second, after the 5-hour window: magpie's account
-// line and menu bar show an account's first two windows, and with them
-// last the Credits bar was never there (01huadalang on Discord). A reply with neither windows
-// nor a plan tells a balance: a key's money, not an allowance. The month's
-// credits come back at until, the end of the plan's period
+// and weekly limits, and the month's credits as one more, used of the
+// CLI's pool (the plan's month of credits, or what is left of it if more,
+// and the bought and free ones) as its /usage bar is. The credits go
+// second, after the 5-hour window: magpie's account line and menu bar show
+// an account's first two windows, and with them last the Credits bar was
+// never there (01huadalang on Discord). On a plan whose credits are
+// usage-value units (Go, GOAT, Pro) the bar is the month's credits alone,
+// said as credits, and the bought and free ones, dollars at model cost
+// (the docs: "Buy extra credits at model cost"), are said beside it, not
+// added to a pool of another unit (plugins #556). A reply with neither
+// windows nor a plan tells a balance: a key's money, not an allowance. The
+// month's credits come back at until, the end of the plan's period
 // (billing/subscriptions' currentPeriodEnd), when it is known
 // (yetone/magpie#2454).
 function allowanceOf(c, until) {
   const out = { windows: limits(c) }
-  const [, name, planMonthly] = planOf(c?.credits?.planId)
+  const [, name, planMonthly, unit] = planOf(c?.credits?.planId)
   if (name) out.plan = name
   let monthly = 0
   let left = 0
@@ -582,9 +600,15 @@ function allowanceOf(c, until) {
     left += n
     known = true
   }
-  if (known && planMonthly > 0) {
+  const reset = until ? { resetsAt: until } : {}
+  if (known && planMonthly > 0 && unit === "units") {
+    const pool = Math.max(planMonthly, monthly)
+    const extra = left - monthly
+    const display = credits(pool - monthly) + " / " + credits(pool) + " credits" + (extra > 0 ? " + " + money(extra) + " extra" : "")
+    out.windows.splice(1, 0, { name: "Credits", used: Math.min(100, (100 * (pool - monthly)) / pool), display, ...reset })
+  } else if (known && planMonthly > 0) {
     const pool = Math.max(planMonthly, monthly) + left - monthly
-    out.windows.splice(1, 0, { name: "Credits", used: Math.min(100, (100 * (pool - left)) / pool), display: money(pool - left) + " / " + money(pool), ...(until ? { resetsAt: until } : {}) })
+    out.windows.splice(1, 0, { name: "Credits", used: Math.min(100, (100 * (pool - left)) / pool), display: money(pool - left) + " / " + money(pool), ...reset })
   } else if (known && !out.windows.length) out.balance = money(left)
   return out
 }
