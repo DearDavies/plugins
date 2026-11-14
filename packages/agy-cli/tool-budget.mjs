@@ -61,6 +61,18 @@ export function cut(text, max) {
   return out.trimEnd() + "…"
 }
 
+// A cut text shorter than this says nothing ("The fil…") and only spends
+// the budget on its key: such a description goes whole or not at all
+// (plugins#1140).
+export const MIN_TEXT = 24
+
+// trim is text within max bytes: whole when it fits, else cut, else null
+// when what a cut would leave is under MIN_TEXT
+function trim(text, max) {
+  if (bytes(text) <= max) return text
+  return max < MIN_TEXT ? null : cut(text, max)
+}
+
 // walk copies one schema node with every description capped: cap(node)
 // gives the byte cap for a node's description, and Infinity leaves it.
 // strip takes the decorative keywords out too.
@@ -72,7 +84,7 @@ function walk(node, cap, strip) {
     if (strip && DECOR.has(key)) continue
     if (key === "description" && typeof value === "string") {
       const max = cap(node)
-      const text = max === Infinity ? value : cut(value, max)
+      const text = max === Infinity ? value : trim(value, max)
       if (text) out.description = text
       continue
     }
@@ -90,14 +102,17 @@ function walk(node, cap, strip) {
   return out
 }
 
-function shaped(tools, { strip, L, top }) {
-  const prop = L === undefined ? () => Infinity : (node) => (isContract(node) ? CONTRACT_WEIGHT * L : L)
+function shaped(tools, { strip, L, lean }) {
+  // lean: an ordinary property keeps only a description short enough to
+  // go whole, and the room goes to the tools' own and the contracts'
+  const plain = lean ? MIN_TEXT - 1 : L
+  const prop = L === undefined ? () => Infinity : (node) => (isContract(node) ? CONTRACT_WEIGHT * L : plain)
   return tools.map((tool) => {
     const out = { ...tool }
     if (tool.inputSchema && typeof tool.inputSchema === "object") out.inputSchema = walk(tool.inputSchema, prop, strip)
     if (typeof tool.description === "string") {
-      const max = top ?? (L === undefined ? Infinity : TOOL_WEIGHT * L)
-      const text = max === Infinity ? tool.description : cut(tool.description, max)
+      const max = L === undefined ? Infinity : TOOL_WEIGHT * L
+      const text = max === Infinity ? tool.description : trim(tool.description, max)
       if (text) out.description = text
       else delete out.description
     }
@@ -119,21 +134,22 @@ function highest(lo, hi, fits) {
 // fitTools gives the tools as agy should list them: unchanged when they fit
 // the budget, else with the decorative keywords gone, then with every
 // description capped at the highest level that fits (a tool's own
-// description gets 2.5 times a property's, a contract property's 11 times),
-// and when that level is nothing, with the properties' descriptions gone and
-// the tools' own capped alone. A set too large even with no descriptions at
-// all goes as small as it can, and agy drops what is left over.
+// description gets 2.5 times a property's, a contract property's 11 times).
+// When that level leaves an ordinary property less than MIN_TEXT, those
+// properties keep only what goes whole, and the highest level that fits
+// then goes to the tools' own descriptions and the contracts', which say
+// what each tool is for and what goes in an open object. A set too large
+// even with no descriptions at all goes as small as it can, and agy drops
+// what is left over.
 export function fitTools(tools, budget = TOOL_TOKEN_BUDGET) {
   if (tokensOf(tools) <= budget) return tools
   const stripped = shaped(tools, { strip: true })
   if (tokensOf(stripped) <= budget) return stripped
   const at = (L) => shaped(tools, { strip: true, L })
-  const fits = (L) => tokensOf(at(L)) <= budget
-  if (!fits(0)) return at(0)
-  const L = highest(0, 4000, fits)
-  if (L > 0) return at(L)
-  // the properties' descriptions are gone; what room is left goes to the
-  // tools' own, which say what each tool is for
-  const bare = (top) => shaped(tools, { strip: true, L: 0, top })
-  return bare(highest(0, 4000, (top) => tokensOf(bare(top)) <= budget))
+  if (tokensOf(at(0)) > budget) return at(0)
+  const L = highest(0, 4000, (n) => tokensOf(at(n)) <= budget)
+  if (L >= MIN_TEXT) return at(L)
+  const lean = (n) => shaped(tools, { strip: true, L: n, lean: true })
+  if (tokensOf(lean(0)) > budget) return at(L)
+  return lean(highest(0, 4000, (n) => tokensOf(lean(n)) <= budget))
 }

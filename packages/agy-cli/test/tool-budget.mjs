@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { TOOL_TOKEN_BUDGET, agyTokens, cut, fitTools } from "../tool-budget.mjs"
+import { MIN_TEXT, TOOL_TOKEN_BUDGET, agyTokens, cut, fitTools } from "../tool-budget.mjs"
 
 const total = (tools) => tools.reduce((n, t) => n + agyTokens(JSON.stringify(t)), 0)
 
@@ -90,6 +90,47 @@ test("a catalog too large for any description keeps every tool", () => {
   assert.deepEqual(fitted.map((t) => t.name), tools.map((t) => t.name))
   for (const t of fitted) assert.equal(t.inputSchema.properties.title.description, undefined)
 })
+
+// plugins#1140's 131 tools after 0.1.46: the schemas alone took ~37 KB of
+// the budget, the level stopped at 10, and 373 of 382 property texts went
+// as 9-byte stubs ("The fil…") that spent ~10 KB on their keys
+function heavy(n, props = 3) {
+  return Array.from({ length: n }, (_, i) => ({
+    name: `tool_${i}`,
+    description: long(`tool_${i}`, 3),
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...Object.fromEntries(Array.from({ length: props }, (_, j) => [`field_${j}`, { type: "string", description: long(`field_${j}`, 2) }])),
+        view: { type: "object", description: long("view", 4) },
+        flag: { type: "boolean", description: "Short." },
+      },
+    },
+  }))
+}
+const bytes = (s) => new TextEncoder().encode(s).length
+
+for (const n of [131, 180]) {
+  test(`with ${n} heavy tools, no property text is a stub and the room goes to the tools' own (plugins#1140)`, () => {
+    const tools = heavy(n)
+    const fitted = fitTools(tools)
+    assert.ok(total(fitted) <= TOOL_TOKEN_BUDGET, `fits (${total(fitted)})`)
+    assert.deepEqual(fitted.map((t) => t.name), tools.map((t) => t.name))
+    for (let i = 0; i < tools.length; i++) {
+      assert.deepEqual(structure(fitted[i].inputSchema), structure(tools[i].inputSchema))
+      const p = fitted[i].inputSchema.properties
+      for (const [k, v] of Object.entries(p)) {
+        const was = tools[i].inputSchema.properties[k].description
+        if (v.description !== undefined && v.description !== was) assert.ok(bytes(v.description) >= MIN_TEXT, `${k}: ${v.description}`)
+      }
+      assert.equal(p.flag.description, "Short.", "a text that fits whole stays")
+      const own = fitted[i].description
+      if (own !== undefined) assert.ok(bytes(own) >= MIN_TEXT, `the tool's own: ${own}`)
+      if (n === 131) assert.ok(own, "with room, every tool says what it is for")
+      assert.ok(bytes(p.view.description ?? "") >= MIN_TEXT, `the contract keeps its text: ${p.view.description}`)
+    }
+  })
+}
 
 test("cut stops on a whole character, within the bytes, and drops the examples first", () => {
   const zh = "这是一个很长的中文说明，每个字是三个字节。".repeat(10)
