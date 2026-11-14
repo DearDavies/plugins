@@ -1640,7 +1640,12 @@ async function complete(s, url, init, magpie) {
       return errorResponse(400, `Antigravity answered 429 to this system prompt: ${msg} — ${hint(system)}`)
     }
     if (res.status === 429 && l.project.credits && !usesCredits(magpie)) {
-      return new Response(withNote(text, CREDITS_NOTE), { status: 429, headers: { "content-type": "application/json" } })
+      // the credits note only where the model's quota may be what ran
+      // out: a 429 with quota left is something else, and credits would
+      // not change it (plugins#1148)
+      const left = await quotaLeft(s, sent)
+      const note = left > 0 ? quotaLeftNote(left) : CREDITS_NOTE
+      return new Response(withNote(text, note), { status: 429, headers: { "content-type": "application/json" } })
     }
     return new Response(text, { status: res.status, headers: { "content-type": res.headers.get("content-type") ?? "application/json" } })
   }
@@ -1655,6 +1660,22 @@ async function complete(s, url, init, magpie) {
 const CREDITS_OPTION = "use-ai-credits"
 const CREDITS_NOTE =
   "this account has Google AI credits; turn on the Use AI credits switch in magpie's Antigravity editor to spend them when the plan's quota is used up, as the app's Use AI Credits does"
+
+// quotaLeft is the fraction of the model's quota fetchAvailableModels
+// reads now, or -1 when it can't say. The cached list may be from before
+// the quota ran out, so a failed read is unknown, not the cached value.
+async function quotaLeft(s, model) {
+  try {
+    const mi = (await modelInfo(s, true)).infos.find((m) => m.id === model)
+    return mi ? mi.remaining : -1
+  } catch {
+    return -1
+  }
+}
+
+function quotaLeftNote(left) {
+  return `this model still has ${Math.max(1, Math.round(left * 100))}% of its quota left, so this 429 is not the plan's quota running out, and Google AI credits would not change it`
+}
 
 function usesCredits(magpie) {
   try {

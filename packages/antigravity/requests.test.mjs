@@ -236,6 +236,40 @@ test("with the switch off, a refused request is not asked again, and the 429 say
   expect(j.error.message).toContain("Use AI credits")
 })
 
+// plugins#1148: a 429 came back while the model's quota wasn't used up,
+// and the credits note read as if it were
+const withQuota = (fraction) => ({ models: { "gemini-3-flash": { displayName: "Gemini 3 Flash", quotaInfo: fraction === undefined ? { resetTime: "2026-11-15T12:00:00Z" } : { remainingFraction: fraction, resetTime: "2026-11-15T12:00:00Z" } } } })
+
+test("a 429 while the model's quota is left says so, not to spend credits (plugins#1148)", async () => {
+  let reads = 0
+  fake({ loadCodeAssist: withCredits, fetchAvailableModels: () => (++reads === 1 ? withQuota(0.8) : withQuota(0.62)), streamGenerateContent: spentQuota })
+  const { f } = await creditsFetch(false)
+  const res = await f(URL_("gemini-3-flash"), { method: "POST", body: ask() })
+  expect(res.status).toBe(429)
+  const msg = (await res.json()).error.message
+  expect(msg).toContain("exhausted your capacity")
+  expect(msg).toContain("62% of its quota left")
+  expect(msg).not.toContain("Use AI credits")
+  expect(reads).toBe(2)
+})
+
+test("a 429 once the model's quota is used up still points at the credits switch", async () => {
+  let reads = 0
+  fake({ loadCodeAssist: withCredits, fetchAvailableModels: () => (++reads === 1 ? withQuota(0.4) : withQuota(undefined)), streamGenerateContent: spentQuota })
+  const { f } = await creditsFetch(false)
+  const msg = (await (await f(URL_("gemini-3-flash"), { method: "POST", body: ask() })).json()).error.message
+  expect(msg).toContain("Use AI credits")
+  expect(msg).not.toContain("quota left")
+})
+
+test("when the quota can't be read again, the 429 keeps the credits note", async () => {
+  let reads = 0
+  fake({ loadCodeAssist: withCredits, fetchAvailableModels: () => (++reads === 1 ? withQuota(0.9) : new Response("boom", { status: 500 })), streamGenerateContent: spentQuota })
+  const { f } = await creditsFetch(false)
+  const msg = (await (await f(URL_("gemini-3-flash"), { method: "POST", body: ask() })).json()).error.message
+  expect(msg).toContain("Use AI credits")
+})
+
 test("an account with no credits is not asked again, with the switch on", async () => {
   const seen = fake({ loadCodeAssist: { cloudaicompanionProject: "ag-proj", paidTier: { id: "g1-pro-tier", name: "Google AI Pro" } }, fetchAvailableModels: models, streamGenerateContent: credited })
   const { f } = await creditsFetch(true)
