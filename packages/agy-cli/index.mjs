@@ -2720,7 +2720,7 @@ function park(proc) {
     historyHash: digest(historyKey(proc.expectedMessages)),
     historyHashSansInputs: digest(historyKey(stripToolUseInputs(proc.expectedMessages))),
     toolUseIdentitiesHash: digest(toolUseIdentitiesKey(proc.expectedMessages) ?? ""),
-    instructionsHash: digest(instructionsIdentity(proc.instructions)),
+    instructionsHash: digest(sentInstructionsIdentity(proc.instructions)),
     workDir: proc.workDir,
     at: Date.now(),
   })
@@ -2736,7 +2736,7 @@ function takeParked(convKey, opts) {
   unparked.add(convKey)
   saveParked()
   if (Date.now() - entry.at > RESUME_TTL_MS || (entry.workDir ?? null) !== (opts.workDir ?? null) ||
-    entry.instructionsHash !== digest(instructionsIdentity(opts.instructions))) return null
+    entry.instructionsHash !== digest(sentInstructionsIdentity(opts.instructions))) return null
   const incoming = digest(historyKey(opts.history))
   if (entry.historyHash === incoming) return { sessionId: entry.sessionId, expectedMessages: opts.history }
   // Sans-inputs resume needs the hashes written by current park(). Old
@@ -3325,6 +3325,16 @@ function stripVolatileSystem(text) {
 
 function instructionsIdentity(text) {
   return compactIdentity(stripVolatileSystem(text))
+}
+
+// sentInstructionsIdentity is the instructions as agy was handed them
+// (outgoing: the lines Antigravity turns away reworded), as a parked
+// session is keyed. A session agy opened with a line a later version
+// rewords keeps that line in its own copy, and every turn on it is turned
+// away, so when the rewording changes, the session is not resumed and a
+// new one is opened with the instructions as they go now (#1151).
+function sentInstructionsIdentity(text) {
+  return compactIdentity(outgoing(stripVolatileSystem(text)))
 }
 
 // Message text used for conversation/history identity: billing header lines,
