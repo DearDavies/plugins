@@ -20,7 +20,7 @@ const page = (over = {}) => json({ is_credits_billing: true, user_entitlement_pa
   { display_desc: "每月登录赠送", entitlement_base_info: { quota: { credits_limit: 500 }, end_time: 1896054399 }, usage: {} },
   ...(over.extra ?? []),
 ] })
-const creditsWindow = { name: "Credits", used: (4.396 / 4500) * 100, display: "4.4 / 4500", amount: 4.4, limit: 4500, unit: "credits", aside: true, resetsAt: new Date(1895012095 * 1000).toISOString() }
+const creditsWindow = { name: "Credits", used: (4.396 / 4500) * 100, display: "4.4 / 4500", amount: 4.4, limit: 4500, unit: "credits", aside: true, resetsAt: new Date(1895012095 * 1000).toISOString(), runsOutAt: new Date(1895012095 * 1000).toISOString(), runsOut: 3995.6 }
 // the console's own period, which the usage page reads its reset date from
 const RESET = 1796054400000
 const core = (over = {}) => json({ code: 0, message: "", Data: { ChatUsed: 0, ChatTotal: 500, PayAsYouGoUsed: 0, PayAsYouGoTotal: 0, ResetTime: RESET, ChatStartTime: 1793462399000, ChatEndTime: 1796054399000, PayAsYouGoStartTime: 1793462399000, PayAsYouGoEndTime: 1796054399000, TotalSeats: 163, ...over }, count: 0 })

@@ -23,7 +23,7 @@ test("credits are the packs' limits and what they used", async () => {
   expect(u.user).toBe("Ann")
   expect(u.signIn).toBe("kept")
   expect(u.balance).toBeUndefined() // the window carries the count (yetone/magpie#694)
-  expect(u.windows).toEqual([{ name: "Credits", used: 25, amount: 100, limit: 400, unit: "credits", resetsAt: new Date(4102444800 * 1000).toISOString() }])
+  expect(u.windows).toEqual([{ name: "Credits", used: 25, amount: 100, limit: 400, unit: "credits", resetsAt: new Date(4102444800 * 1000).toISOString(), runsOutAt: new Date(4102444800 * 1000).toISOString(), runsOut: 225 }])
 })
 
 test("unlimited packs say so", () => {
@@ -387,4 +387,26 @@ test("the soonest end is a live pack's", () => {
   expect(u.until).toBe(Date.parse("2026-11-20T00:00:00Z"))
   // nothing live: no date at all
   expect(_internal.credits({ user_entitlement_pack_list: [pack(300, 300, "2026-11-20T00:00:00Z")] }, now).until).toBe(0)
+})
+
+// gcq909893267's account B on #718, its packs as Trae answered them (ids
+// out): the monthly pack, a spent sign-in reward and one with 95.85 left
+test("a sign-in reward pack's credits run out at its end", async () => {
+  const packs = [
+    { display_desc: "每月登录赠送", entitlement_base_info: { charge_amount: 0, currency: 1, end_time: 1796054399, ent_status: 0, product_extra: { package_extra: { duration: 1, package_duration_type: 1, package_source_type: 0, quota: { credits_limit: 500 } } }, product_id: 221, product_type: 2, quota: { credits_limit: 500 }, start_time: 1793462400 }, expire_time: 1796054399, group_name: "每月登录积分", group_type: 3, is_hide: false, is_last_period: false, is_oneweek: false, next_billing_time: 0, source_id: "", status: 1, usage: {}, yearly_expire_time: 0 },
+    { display_desc: "签到奖励", entitlement_base_info: { charge_amount: 0, currency: 1, end_time: 1794758624, ent_status: 0, product_extra: { package_extra: { duration: 31, package_duration_type: 0, package_name: "签到奖励", package_source_type: 9, quota: { credits_limit: 100 } } }, product_id: 208, product_type: 2, quota: { credits_limit: 100 }, start_time: 1792080224 }, expire_time: 1794758624, group_name: "每日签到", group_type: 1, is_hide: false, is_last_period: false, is_oneweek: false, next_billing_time: 0, source_id: "", status: 1, usage: { credits_amount: 100 }, yearly_expire_time: 0 },
+    { display_desc: "签到奖励", entitlement_base_info: { charge_amount: 0, currency: 1, end_time: 1794931244, ent_status: 0, product_extra: { package_extra: { duration: 31, package_duration_type: 0, package_name: "签到奖励", package_source_type: 9, quota: { credits_limit: 100 } } }, product_id: 208, product_type: 2, quota: { credits_limit: 100 }, start_time: 1792252844 }, expire_time: 1794931244, group_name: "每日签到", group_type: 1, is_hide: false, is_last_period: false, is_oneweek: false, next_billing_time: 0, source_id: "", status: 1, usage: { credits_amount: 4.1456 }, yearly_expire_time: 0 },
+  ]
+  const now = Date.parse("2026-11-14T16:31:21Z")
+  const c = _internal.credits({ user_entitlement_pack_list: packs }, now)
+  expect(c.until).toBe(1794931244 * 1000) // 11-18 00:00:44 Beijing, not the spent 11-16 pack
+  expect(Math.round(c.lapsing * 100) / 100).toBe(95.85)
+  // two rewards ending at the same second lapse together
+  const twin = structuredClone(packs[2])
+  twin.usage = { credits_amount: 0 }
+  expect(Math.round(_internal.credits({ user_entitlement_pack_list: [...packs, twin] }, now).lapsing * 100) / 100).toBe(195.85)
+  // once both rewards are past, the monthly pack is what lapses, all 500
+  const later = _internal.credits({ user_entitlement_pack_list: packs }, Date.parse("2026-11-20T00:00:00Z"))
+  expect(later.until).toBe(1796054399 * 1000)
+  expect(later.lapsing).toBe(500)
 })
