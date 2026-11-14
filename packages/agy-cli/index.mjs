@@ -1938,6 +1938,7 @@ class Proc {
       throw new UnsupportedContent("image input with this agy ACP server; update to an image-capable agy version")
     }
     const turn = new Turn(this, messages)
+    turn.model = model
     this.turn = turn
     this.expectedMessages = messages.map((message) => ({ ...message }))
     this.historyInvalid = false
@@ -2835,7 +2836,9 @@ async function withAcquireLocks(keys, fn) {
   return run(0)
 }
 
-async function acquireProc(agyPath, convKey, opts, isFreshConversation, forceNew = false) {
+// begin, when given, starts the turn inside the same locks, so a request that
+// waits on them sees this one's turn and is never handed a process about to be busy.
+async function acquireProc(agyPath, convKey, opts, isFreshConversation, forceNew = false, begin = null) {
   // Discover a live continued session's current key, lock it together with
   // the new key (sorted, to avoid deadlock), then pick again inside those
   // locks. A process is re-keyed only when its current key is already held.
@@ -2849,7 +2852,8 @@ async function acquireProc(agyPath, convKey, opts, isFreshConversation, forceNew
         const needed = candidate?.convKey
         if (needed && !locked.has(needed) && attempt < 2) return { retry: needed }
       }
-      return { value: await acquireProcLocked(agyPath, convKey, opts, isFreshConversation, forceNew, locked) }
+      const value = await acquireProcLocked(agyPath, convKey, opts, isFreshConversation, forceNew, locked)
+      return { value: begin ? { ...value, turn: await begin(value.proc, value.history) } : value }
     })
     if (outcome.retry) {
       extra = outcome.retry
@@ -2893,6 +2897,19 @@ async function acquireProcLocked(agyPath, convKey, opts, isFreshConversation, fo
     if (candidate && lockedKeys.has(candidate.convKey)) existing = rekeyProc(candidate, convKey)
   }
   let why = "no_live"
+  let key = convKey
+  if (existing && !existing.dead && existing.turn && isFreshConversation && !forceNew &&
+    !opts.hasToolResults && !existing.turn.cancelRequested && existing.turn.model !== opts.model) {
+    // A new conversation that opens as a running one did (one system prompt and
+    // one first message), for another model, is a conversation of its own, not
+    // a resend of the running one: magpie's Test models sends every model the
+    // same "hi" at once (swang20201 on X). It gets an agy of its own, under a
+    // key of its own; its follow-ups key as the first. The same request for
+    // the same model while the first runs is still refused as a resend.
+    key = `${convKey}#${opts.reqId || randomBytes(4).toString("hex")}`
+    existing = null
+    why = "concurrent_opening"
+  }
   if (existing) {
     if (!existing.dead && existing.turn) {
       throw new BusyError("agy bridge: this conversation still has an unfinished response")
@@ -2936,14 +2953,14 @@ async function acquireProcLocked(agyPath, convKey, opts, isFreshConversation, fo
     }
   }
   const resume = forceNew || isFreshConversation ? null : takeParked(convKey, opts)
-  const proc = new Proc(agyPath, convKey, { ...opts, resume })
+  const proc = new Proc(agyPath, key, { ...opts, resume })
   try {
     await proc.start()
   } catch (error) {
     await proc.stop().catch(() => {})
     throw error
   }
-  pool.set(convKey, proc)
+  pool.set(key, proc)
   // Why this request got a new agy session, so a cache that never hits can be
   // traced to the check that failed (#1058). Counts only, never content.
   logSessionEvent(proc, why, {
@@ -5984,14 +6001,14 @@ export const AntigravityBridgePlugin = async () => {
                 }
               }
 
-              const { proc, history } = await acquireProc(
+              const { proc, turn } = await acquireProc(
                 agy,
                 convKey,
                 acquireOpts,
                 isFresh,
                 resultBlocks.length > 0 && !keptSession,
+                begin,
               )
-              const turn = await begin(proc, history)
               return streamResponse(proc, turn, body, init.signal)
             } catch (error) {
               return jsonError(error.statusCode ?? 502, error.message, error.code, { noRetry: error.noRetry })
