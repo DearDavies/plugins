@@ -361,13 +361,19 @@ describe("usage", () => {
       // the daily wallet at 100% is shown, set aside
       expect(ws.find((w) => w.name === "每日赠送积分")).toMatchObject({ used: 100, aside: true })
       expect(ws.find((w) => w.name === "永久积分")).toMatchObject({ display: "1200 credits", aside: true })
-      // nothing of the daily wallet left: nothing lapses at midnight
+      // nothing of the daily wallet left: nothing lapses at midnight, so the
+      // total names no reset and smart routing puts accounts whose reset
+      // loses credits ahead of it (plugins#1153); the daily wallet beside it
+      // still shows midnight
       expect(total.runsOutAt).toBeUndefined()
-      expect(total.resetsAt).toBe(_internal.beijingMidnight())
+      expect(total.resetsAt).toBeUndefined()
+      expect(total.span).toBeUndefined()
+      expect(ws.find((w) => w.name === "每日赠送积分").resetsAt).toBe(_internal.beijingMidnight())
 
       // both gone: used up, back at Beijing midnight
       ws = await read({ balance: 0, dailyBalance: 0, dailyLimitPoints: 5000, dailyRemainingPoints: 0 })
       expect(counted(ws)[0]).toMatchObject({ used: 100, amount: 5000, limit: 5000 })
+      expect(counted(ws)[0].resetsAt).toBe(_internal.beijingMidnight())
 
       // 3,000 daily credits left are lost at midnight: runsOutAt / runsOut
       ws = await read({ balance: 1200, dailyBalance: 3000, dailyLimitPoints: 5000, dailyRemainingPoints: 3000 })

@@ -80,8 +80,11 @@ const beijingMidnight = () => Math.floor((Date.now() + 8 * 3600e3) / 86400e3) * 
 // wallet has spent; the permanent balance has nothing spent to tell, so the
 // total is spent of spent + left, and with nothing left it is all used. It
 // renews with the daily wallet at Beijing midnight, when the daily credits
-// left are lost (runsOutAt, runsOut), so routing spends those first. null
-// with neither wallet told.
+// left are lost (runsOutAt, runsOut), so routing spends those first. With
+// the daily credits spent and permanent ones left, midnight loses nothing,
+// so the total names no reset: smart routing puts an account whose reset
+// does lose credits first (plugins#1153). Used up, it names midnight, when
+// it is back. null with neither wallet told.
 function totalOf(dailyWallet, dailyLeft, permanent) {
   if (dailyLeft == null && permanent == null) return null
   const spent = dailyWallet?.amount ?? 0
@@ -96,8 +99,12 @@ function totalOf(dailyWallet, dailyLeft, permanent) {
     unit: "credits",
   }
   if (dailyWallet) {
-    w.resetsAt = beijingMidnight()
-    if (dailyWallet.span) w.span = dailyWallet.span
+    // no span either: magpie reads a window with a span and no reset as
+    // renewing a span from now, which would rank it again
+    if (dailyLeft > 0 || left === 0) {
+      w.resetsAt = beijingMidnight()
+      if (dailyWallet.span) w.span = dailyWallet.span
+    }
     if (dailyLeft > 0) Object.assign(w, { runsOutAt: w.resetsAt, runsOut: dailyLeft })
   }
   return w
