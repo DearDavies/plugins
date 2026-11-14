@@ -3233,8 +3233,11 @@ const effortOf = (levels, effort) => {
 // ---- usage ------------------------------------------------------------------------
 
 // credits adds up the account's entitlement packs as the IDE shows them:
-// each pack with a credit limit (-1 unlimited) and what it used
-function credits(v) {
+// each pack with a credit limit (-1 unlimited) and what it used. until is
+// the soonest end of a pack that still has credits left and has not ended:
+// a spent daily pack or one already past its end changes nothing on the
+// account, so it does not name the date the credits turn over (#718, #1157).
+function credits(v, now = Date.now()) {
   let limit = 0
   let used = 0
   let unlimited = false
@@ -3248,7 +3251,8 @@ function credits(v) {
     else if (l >= 0) limit += l
     if (u > 0) used += u
     const end = whenOf(bi.end_time ?? bi.expire_time ?? p.end_time)
-    if (end && (!soonest || end < soonest)) soonest = end
+    const left = l === -1 || (l > 0 && u < l)
+    if (end && end > now && left && (!soonest || end < soonest)) soonest = end
   }
   return { limit, used, unlimited, until: soonest }
 }
