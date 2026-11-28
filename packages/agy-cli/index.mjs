@@ -4903,6 +4903,13 @@ async function acquireProcLocked(agyPath, convKey, opts, isFreshConversation, fo
       // where the history first differs from the session's, with no text,
       // as drop_live logs it (yetone/magpie#7223)
       if (why === "history") historyDiff = firstHistoryDiff(existing.expectedMessages, matchedHistory)
+      // An idle session that went on past rows the client never kept (a
+      // side question answered after a step's results, then left out of
+      // the next request: plugins#1693) resumes at the rows both still
+      // share, as a live turn the client left does (parkRebase), instead of
+      // a new session that replays everything and reads nothing cached.
+      if (!isFreshConversation && (why === "history" || (why === "forced" && opts.resumeStep)) &&
+        parkRebase(existing, null, opts.messages, opts.history, opts, convKey)) opts.rebase = true
     }
     if (!forceNew && launch && (statelessRequest(opts)
       ? statelessDonor(existing, launch, opts.userId || "", opts.sessionScope || "", opts.workDir)

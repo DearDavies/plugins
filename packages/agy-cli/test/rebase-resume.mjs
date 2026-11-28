@@ -504,3 +504,103 @@ test("tools_grew: a step agy already ended, answered with a grown catalog, resum
     }
   })
 })
+
+// plugins#1693 (Sor85, ChatLuna): a step that ended with a reply call (A);
+// A's result came back with a one-off side question the live session
+// answered, and the next request has A's result with a new message in the
+// question's place. The idle session holds rows the client never kept.
+async function sideQuestion(kit, { together = false } = {}) {
+  const seen = { prompts: [] }
+  kit.prompts.push(async (agent) => {
+    await agent.text("thinking about it")
+    await agent.tool("Read", { path: "/fixture/reply" })
+    return { stopReason: "end_turn" }
+  })
+  kit.defaultPrompt = async (agent) => {
+    seen.prompts.push(JSON.stringify(agent.prompt))
+    await agent.text("answer")
+    return { stopReason: "end_turn" }
+  }
+  const opening = baseBody()
+  const main = await readSse(await kit.request(opening))
+  const call = main.content.find((block) => block.type === "tool_use")
+  const history = [
+    ...opening.messages,
+    { role: "assistant", content: main.content.map((block) => block.type === "tool_use"
+      ? { type: "tool_use", id: block.id, name: block.name, input: block.input }
+      : { type: "text", text: block.text }) },
+  ]
+  const result = { type: "tool_result", tool_use_id: call.id, content: "{\"sent\":1}" }
+  const ask = (text) => together
+    ? [...history, { role: "user", content: [result, { type: "text", text }] }]
+    : [...history, { role: "user", content: [result] }, { role: "user", content: text }]
+  const side = await readSse(await kit.request({ ...opening, tool_choice: { type: "none" }, messages: ask("Update your memory.") }))
+  assert.equal(side.stopReason, "end_turn")
+  return { seen, opening, next: { ...opening, messages: ask("a new chat message") } }
+}
+
+for (const together of [false, true]) {
+  test(`#1693 the next message after a side question on A's result resumes the session (${together ? "one" : "two"} user messages)`, async () => {
+    await withKit({}, async (kit) => {
+      const { events, restore } = captureEvents()
+      try {
+        const { seen, next } = await sideQuestion(kit, { together })
+        const response = await readSse(await kit.request(next))
+        assert.equal(response.stopReason, "end_turn")
+        assert.equal(methods(kit, "session/new").length, 1, "no cold new session")
+        const resumes = methods(kit, "session/resume")
+        assert.equal(resumes.length, 1)
+        assert.equal(resumes[0].params.sessionId, methods(kit, "session/prompt")[0].sessionId)
+        const prompt = seen.prompts.at(-1)
+        assert.ok(prompt.includes("a new chat message"))
+        assert.ok(!prompt.includes("Update your memory."), "the side question is not sent again")
+        assert.match(prompt, /is not in the client's conversation/, "agy is told the side question is gone")
+        assert.equal(prompt.split("start the task").length, 1, "the opening stays in the session, not replayed")
+        const row = events.filter((event) => event.action === "session_new").at(-1)
+        assert.equal(row.resumed, true, JSON.stringify(row))
+        assert.ok(row.rebase >= 2, JSON.stringify(row))
+
+        // the conversation goes on in the resumed session as a plain delta
+        const after = structuredClone(next)
+        after.messages.push({ role: "assistant", content: [{ type: "text", text: "answer" }] }, { role: "user", content: "and another" })
+        assert.equal((await readSse(await kit.request(after))).stopReason, "end_turn")
+        assert.equal(methods(kit, "session/new").length, 1)
+        assert.equal(methods(kit, "session/resume").length, 1)
+        assert.ok(seen.prompts.at(-1).includes("and another"))
+        assert.ok(!seen.prompts.at(-1).includes("a new chat message"), "no replay after the rebase")
+      } finally {
+        restore()
+      }
+    })
+  })
+}
+
+test("#1693 a side question after a text reply, left out of the next request, resumes the session too", async () => {
+  await withKit({}, async (kit) => {
+    const seen = { prompts: [] }
+    recordPrompts(kit, seen)
+    const opening = baseBody()
+    const first = await readSse(await kit.request(opening))
+    assert.equal(first.stopReason, "end_turn")
+    const history = [...opening.messages, { role: "assistant", content: [{ type: "text", text: "OK" }] }]
+    await readSse(await kit.request({ ...opening, messages: [...history, { role: "user", content: "Update your memory." }] }))
+    const response = await readSse(await kit.request({ ...opening, messages: [...history, { role: "user", content: "a new chat message" }] }))
+    assert.equal(response.stopReason, "end_turn")
+    assert.equal(methods(kit, "session/new").length, 1)
+    assert.equal(methods(kit, "session/resume").length, 1)
+    const prompt = seen.prompts.at(-1)
+    assert.ok(prompt.includes("a new chat message"))
+    assert.ok(!prompt.includes("Update your memory."))
+    assert.match(prompt, /is not in the client's conversation/)
+  })
+})
+
+test("#1693 without session/resume the next message after a side question still replays into a new session", async () => {
+  await withKit({ sessionResume: false }, async (kit) => {
+    const { seen, next } = await sideQuestion(kit)
+    assert.equal((await readSse(await kit.request(next))).stopReason, "end_turn")
+    assert.equal(methods(kit, "session/new").length, 2)
+    assert.equal(methods(kit, "session/resume").length, 0)
+    assert.ok(seen.prompts.at(-1).includes("start the task"), "the whole conversation is replayed")
+  })
+})

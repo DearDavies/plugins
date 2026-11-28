@@ -29,7 +29,7 @@ OpenCode、Claude Code 等客户端经由 Magpie 调用 agy 向本插件开放�
   机器上没有时，在 Magpie 里登录会按 Google 官方安装脚本的方式装一份（见「环境要求」）。
 - **会话**：Antigravity ACP 每个请求开一个新会话，把历史当作上下文带上。本插件维护一个
   agy 进程池，同一段对话复用同一个 agy 会话，重启后用 `session/resume` 接上；只有接不上时
-  才重放历史。客户端中断或改写了一步（拒绝的工具调用、改过的历史）时也不开新会话：会话停在
+  才重放历史。客户端中断或改写了一步（拒绝的工具调用、改过的历史），或下一条请求里没有空闲会话已经答过的一次性侧问时，也不开新会话：会话停在
   双方仍相同的那几行，用 `session/resume` 接上，只发之后的内容；相差的部分超过 64 KiB 或
   超过整段对话的一半时照旧重放。agy 会把一条提示词截在 128 KiB，所以 agy 1.5.17 起，更长的重放（或很长的粘贴）
   分几条提示词发完，除最后一条外每条都在模型回答前取消，直到模型的窗口
@@ -262,6 +262,7 @@ macOS 上，以 LaunchDaemon 方式运行的 Magpie 不在你的登录会话里�
 | `AGY_BRIDGE_DETACHED_EVICT_MS` | 30000 | 客户端已断开的挂起工具回合，最多占用进程池槽位这么久 |
 | `AGY_BRIDGE_MAX_PROMPT_BYTES` | 114688（112 KiB） | 一条提示词的字节预算（agy 会把一条提示词截在 128 KiB） |
 | `AGY_BRIDGE_MAX_REPLAY_BYTES` | 模型窗口减去输出和 32K token，按每 token 2 字节算（插件不认识的模型为 384 KiB） | 新会话重放历史的字节预算，需要几条提示词就分几条发（agy 1.5.17 起）；超出的部分不发，并告诉模型 |
+| `AGY_BRIDGE_REBASE_HOLDER_WAIT_MS` | 6000 | 停在相同几行的会话，等停下它的旧 agy 退出的最长时间；超过就在新会话里重放 |
 | `AGY_BRIDGE_STRICT_REPLAY` | 关闭 | 设为 `1` 时，新会话的重放只要会省掉或截断对话的任何部分就拒绝：请求得到 400「prompt is too long」（`context_length_exceeded`，不重试），什么都不发给 agy，客户端可以先压缩，而不是让模型只看到一部分历史就回答 |
 | `AGY_BRIDGE_SEED_REPLAY` | 开启 | 设为 `0` 时重放只发一条 `AGY_BRIDGE_MAX_PROMPT_BYTES` 大小的提示词，即 0.1.139 之前的做法 |
 | `AGY_BRIDGE_USAGE_TIMEOUT_MS` | 45000 | agy 自己读额度的时间预算，最高 120000 |

@@ -40,7 +40,13 @@ channel: Antigravity's models over ACP. The differences:
 - **Sessions**: Antigravity ACP opens a new session per request and carries the
   history as context. This plugin keeps a pool of agy processes, reuses one agy
   session for one conversation, and picks it up again with `session/resume`
-  after a restart; only when that fails does it replay the history. agy cuts
+  after a restart; only when that fails does it replay the history. A client
+  that interrupted or rewrote a step (a rejected tool call, an edited
+  history), or left out a one-off side question the idle session already
+  answered, gets no new session either: the session is resumed with
+  `session/resume` at the rows both sides still share, and only what
+  follows is sent, unless that is over 64 KiB or over half the
+  conversation, which replays as before. agy cuts
   one prompt at 128 KiB, so with agy 1.5.17 or later a longer replay (or a
   long paste) goes in over as many prompts as it takes, each but the last
   cancelled before the model answers it, up to the model's window
@@ -57,7 +63,10 @@ channel: Antigravity's models over ACP. The differences:
   and its `reason` to the plugin host's log; `park_miss` says why a
   session kept from before a restart was not taken (`none`, `expired`,
   `work_dir`, `instructions`, `history`, `agent_mode` for one an older
-  version left on a custom agent, ...), and `resume_failed` why
+  version left on a custom agent; `rebase`, `rebase_tail` and
+  `state_busy` for a session parked at the shared rows that wasn't taken,
+  `holder_alive` when the agy that parked it didn't exit within
+  `AGY_BRIDGE_REBASE_HOLDER_WAIT_MS`, ...), and `resume_failed` why
   agy's `session/resume` failed.
 - **Tool calls**: Antigravity ACP ends the turn with the call as the reply's
   `tool_calls`. This plugin feeds the client's result back into the same agy
@@ -381,6 +390,7 @@ account", which keeps its sign-in in a file.
 | `AGY_BRIDGE_DETACHED_EVICT_MS` | 30000 | How long a suspended tool turn whose client disconnected may keep its pool slot |
 | `AGY_BRIDGE_MAX_PROMPT_BYTES` | 114688 (112 KiB) | Byte budget for one prompt (agy cuts a prompt at 128 KiB) |
 | `AGY_BRIDGE_MAX_REPLAY_BYTES` | the model's window less its output and 32K tokens, at 2 bytes a token (384 KiB for a model the plugin doesn't know) | Byte budget for history replayed into a new session, over as many prompts as it takes (agy 1.5.17+); history past it is left out and the model is told |
+| `AGY_BRIDGE_REBASE_HOLDER_WAIT_MS` | 6000 | How long a request waits for the agy that parked a session at the shared rows to exit before resuming it; past it, the conversation replays into a new session |
 | `AGY_BRIDGE_STRICT_REPLAY` | off | Set to `1` to refuse a new session whose replay would leave out or cut any of the conversation: the request gets a 400 "prompt is too long" (`context_length_exceeded`, not retried) and nothing goes to agy, so the client can compact instead of the model answering from part of the history |
 | `AGY_BRIDGE_SEED_REPLAY` | on | Set to `0` to send a replay as one prompt of `AGY_BRIDGE_MAX_PROMPT_BYTES`, as before 0.1.139 |
 | `AGY_BRIDGE_USAGE_TIMEOUT_MS` | 45000 | Time agy gets for its own usage read, capped at 120000 |
